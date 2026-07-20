@@ -80,12 +80,12 @@ This returns the server version, available tools, and configuration details.
 |---------|-------|-----|
 | "Not authenticated" | No token file exists | Run through the [initial setup](connect-outlook-to-claude.md) |
 | "Token expired" with auto-refresh failure | Refresh token revoked or client secret changed | Re-authenticate with `force: true` |
-| Auth succeeds but API calls fail with 403 | Insufficient permissions | Add missing permissions in [Azure Portal](https://portal.azure.com), then delete `~/.outlook-assistant-tokens.json` and re-authenticate to pick up new scopes |
+| Auth succeeds but API calls fail with 403 | Insufficient permissions | Add missing permissions in [Azure Portal](https://portal.azure.com), then delete the token file for that profile (`~/.outlook-assistant-tokens.json` or `~/.outlook-assistant-<account>-tokens.json`) and re-authenticate to pick up new scopes |
 | "AADSTS700082" | Refresh token expired (>90 days inactive) | Re-authenticate with `force: true` |
 | "AADSTS7000215" | Client secret is wrong (using Secret ID instead of Value) or has expired | Check [Azure Setup Guide — Client Secret](../../guides/azure-setup.md#4-create-a-client-secret) |
 | "AADSTS50059" | Single-tenant Azure app is using the default `common` audience | Set `OUTLOOK_AUTH_AUDIENCE` to the app registration's Directory (tenant) ID, then re-authenticate |
 | "Need admin approval" during OAuth | Organisation requires admin consent | Ask your IT admin to grant consent — see [Admin Consent](../../guides/azure-setup.md#for-workschool-accounts-admin-consent) |
-| Token file exists but auth reports failure | Corrupted token file | Delete `~/.outlook-assistant-tokens.json` and re-authenticate |
+| Token file exists but auth reports failure | Corrupted token file | Delete the token file for that profile (`~/.outlook-assistant-tokens.json` or `~/.outlook-assistant-<account>-tokens.json`) and re-authenticate |
 | Auth server says "missing client ID" | Auth server does not have env vars | Create a `.env` file or export `OUTLOOK_CLIENT_ID`/`OUTLOOK_CLIENT_SECRET` in your shell — see [Connect guide](connect-outlook-to-claude.md#authenticate-for-the-first-time) |
 | Device code "invalid_client" | Public client flows not enabled | Enable "Allow public client flows" in Azure Portal > App registrations > Authentication > Advanced settings |
 | "No pending device code flow" | Called `device-code-complete` before `authenticate`, or server restarted (pre-v3.7.2) | Call `auth` with `action: authenticate` first. In v3.7.2+, device code state persists across server restarts. |
@@ -97,14 +97,15 @@ This returns the server version, available tools, and configuration details.
 ## Tips
 
 - Tokens auto-refresh in the background — you rarely need to manually re-authenticate
-- If you switch Microsoft accounts, use `force: true` to authenticate with the new account
-- The token file at `~/.outlook-assistant-tokens.json` contains sensitive credentials — don't share or commit it
+- If you switch Microsoft accounts in the same server entry, use `force: true` to authenticate with the new account
+- For multiple accounts, prefer separate MCP server entries with unique `OUTLOOK_ACCOUNT_ID` values instead of repeatedly switching one entry
+- Token files such as `~/.outlook-assistant-tokens.json` and `~/.outlook-assistant-<account>-tokens.json` contain sensitive credentials — don't share or commit them
 
 ## Frequently Asked Questions
 
 ### How often do I need to re-authenticate?
 
-Rarely. Access tokens expire after about 1 hour, but the MCP server automatically refreshes them using the refresh token stored in `~/.outlook-assistant-tokens.json`. Refresh tokens last up to 90 days of inactivity. You only need to manually re-authenticate if:
+Rarely. Access tokens expire after about 1 hour, but the MCP server automatically refreshes them using the refresh token stored in `~/.outlook-assistant-tokens.json` or the account-specific token file. Refresh tokens last up to 90 days of inactivity. You only need to manually re-authenticate if:
 
 - You have not used Outlook Assistant for more than 90 days
 - You changed your Microsoft account password
@@ -113,7 +114,7 @@ Rarely. Access tokens expire after about 1 hour, but the MCP server automaticall
 
 ### Can I use Outlook Assistant on multiple computers?
 
-Yes, but each computer needs its own authentication. The token file (`~/.outlook-assistant-tokens.json`) is stored locally and is not shared between machines. Run through the [authentication steps](connect-outlook-to-claude.md#authenticate-for-the-first-time) on each computer.
+Yes, but each computer needs its own authentication. Token files (`~/.outlook-assistant-tokens.json` or `~/.outlook-assistant-<account>-tokens.json`) are stored locally and are not shared between machines. Run through the [authentication steps](connect-outlook-to-claude.md#authenticate-for-the-first-time) on each computer.
 
 Your Azure app registration and client credentials (`OUTLOOK_CLIENT_ID`/`OUTLOOK_CLIENT_SECRET`) are the same across all computers — only the token file differs.
 

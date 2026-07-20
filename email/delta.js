@@ -177,6 +177,7 @@ async function handleListEmailsDelta(args) {
         syncType: isInitialSync ? 'initial' : 'incremental',
         folder: folder,
         itemCount: processedEmails.length,
+        emails: processedEmails,
         hasMoreChanges: hasMoreChanges,
         changesSummary: changesSummary,
         deltaToken: newDeltaToken,

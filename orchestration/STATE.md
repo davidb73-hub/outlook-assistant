@@ -570,3 +570,12 @@ Checks:
   - To Do live mutation check: created one `oa-live-activation-*` test task, completed it, then deleted it using returned IDs → PASS
 Gate: PASSED
 Notes: Live output was sanitized: no email subjects, bodies, message IDs, task IDs, task-list IDs, tokens, or unrelated mailbox content were recorded. This resolves the prior #89 delegated To Do consent/live-verification blocker. App-only auth remains optional and still requires Azure certificate, application permissions, admin consent, and Exchange mailbox scoping before live verification.
+
+## [2026-07-08 18:05] Requirement added — R1 timezone-correct time rendering
+Branch/PR: docs/phase-0-golive-final / n/a
+Checks:
+  - Observation: live `outlook_email_search` returned `receivedDateTime` values as UTC (`...Z`); owner asked to confirm they were Sydney time — they were not → PASS
+  - Code grounding: `grep -rn "receivedDateTime|toLocaleString|timeZone" email/` → `email/headers.js:258` and `email/conversations.js:539,637` emit raw UTC; `email/export.js:168` uses host-local `toLocaleString('en-AU')`; only `calendar/list.js` (#118) converts via `{ timeZone: tz }` → PASS
+  - Requirement recorded: added §3a R1 to `orchestration/00-SCOPE-PROPOSAL.md` — all user-facing times must convert to `OUTLOOK_DEFAULT_TIMEZONE` and name the zone, DST-correct (AEST↔AEDT) via `Intl`, never a fixed offset → PASS
+Gate: PASSED
+Notes: No source/test code was changed. R1 is the requirement of record; the email-side fix (`email/headers.js`, `email/conversations.js`, `email/export.js`) is unbudgeted with no ROADMAP issue — a task/issue should be opened before implementing. #118 already satisfies R1 for `list-events`. No live mutation was performed.

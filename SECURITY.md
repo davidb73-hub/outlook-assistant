@@ -21,8 +21,9 @@ If you discover a security vulnerability, please report it responsibly:
 
 ### Token Storage
 
-- OAuth tokens are stored locally at `~/.outlook-assistant-tokens.json`
-- Ensure this file has appropriate permissions (readable only by owner): `chmod 600 ~/.outlook-assistant-tokens.json`
+- OAuth tokens are stored locally at `~/.outlook-assistant-tokens.json` by default
+- When `OUTLOOK_ACCOUNT_ID` is set for multi-account use, tokens are stored at `~/.outlook-assistant-<account>-tokens.json`
+- Ensure token files have appropriate permissions (readable only by owner): `chmod 600 ~/.outlook-assistant*-tokens.json`
 - Never commit token files to version control
 - Client credentials auth does not store refresh tokens; it reads certificate/private-key PEM files and caches short-lived app-only access tokens in memory only
 

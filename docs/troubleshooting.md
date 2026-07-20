@@ -40,6 +40,8 @@ cat ~/.outlook-assistant-tokens.json | python3 -c "import json,sys; t=json.load(
 ls -la ~/.outlook-assistant-pending-auth.json 2>/dev/null || echo "No pending flow"
 ```
 
+For a named account profile, replace the filenames with the profile-specific versions, for example `~/.outlook-assistant-work-tokens.json` and `~/.outlook-assistant-work-pending-auth.json`.
+
 ## Forcing a Fresh Auth
 
 If tokens are corrupted or stuck:
@@ -47,6 +49,13 @@ If tokens are corrupted or stuck:
 ```bash
 rm ~/.outlook-assistant-tokens.json ~/.outlook-assistant-pending-auth.json
 # Then call the auth tool again with action=authenticate
+```
+
+For a named account profile, remove only that profile's files:
+
+```bash
+rm ~/.outlook-assistant-work-tokens.json ~/.outlook-assistant-work-pending-auth.json
+# Then authenticate the matching MCP server entry again
 ```
 
 ## Reporting Issues

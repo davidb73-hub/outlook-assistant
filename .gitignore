@@ -18,6 +18,9 @@ yarn.lock
 *.cert
 *.token.json
 .outlook-assistant-tokens.json
+.outlook-assistant-*-tokens.json
+.outlook-assistant-pending-auth.json
+.outlook-assistant-*-pending-auth.json
 
 # Editor directories and files
 .idea/
@@ -27,6 +30,30 @@ yarn.lock
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local agent/orchestration runtime state (not product source)
+.agents/
+.claude-flow/
+.swarm/
+.codex/
+.claude/agents/
+.claude/commands/
+.claude/helpers/
+.claude/skills/
+.claude/memory.db*
+.claude/.proven-config-version
+.claude/proven-config-version
+.claude/proven-config.json
+.claude/settings.json
+ruvector.db
+
+# Local MCP configuration and private evidence
+.mcp.json
+*.eml
+corpus/
+
+# Generated test/runtime output
+coverage/
 
 # OS specific files
 .DS_Store

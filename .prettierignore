@@ -6,3 +6,14 @@ dist
 incoming
 backup_claude
 *.mov
+**/state/
+**/reports/
+.agents/
+.claude-flow/
+.swarm/
+.codex/
+.claude/agents/
+.claude/commands/
+.claude/helpers/
+.claude/skills/
+scripts/claude-flow-mcp-wrapper.js

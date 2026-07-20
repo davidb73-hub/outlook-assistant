@@ -187,7 +187,7 @@ The device code flow lets you authenticate without running the auth server — i
 7. Set **Allow public client flows** to **Yes**
 8. Click **Save**
 
-> **Why?** Device code flow is a "public client" flow that doesn't require the client secret during authentication. This is the default auth method in Outlook Assistant v3.5.1+. The native client redirect URI tells Microsoft to handle device code sign-in correctly. In v3.7.2+, device code state is persisted to disk (`~/.outlook-assistant-pending-auth.json`) so authentication survives MCP server restarts, and token refresh correctly omits `client_secret` for public client tokens.
+> **Why?** Device code flow is a "public client" flow that doesn't require the client secret during authentication. This is the default auth method in Outlook Assistant v3.5.1+. The native client redirect URI tells Microsoft to handle device code sign-in correctly. In v3.7.2+, device code state is persisted to disk (`~/.outlook-assistant-pending-auth.json`, or a profile-specific file when `OUTLOOK_ACCOUNT_ID` is set) so authentication survives MCP server restarts, and token refresh correctly omits `client_secret` for public client tokens.
 >
 > If you skip this step, you can still authenticate using the browser redirect flow (`method=browser`), but you'll need to run the auth server on port 3333.
 
@@ -255,7 +255,7 @@ In your AI assistant, use the `auth` tool with `action=authenticate`. It returns
 3. Review and accept the requested permissions
 4. You'll see a success message in the browser
 
-Tokens are saved to `~/.outlook-assistant-tokens.json` and refresh automatically.
+Tokens are saved to `~/.outlook-assistant-tokens.json`, or to `~/.outlook-assistant-<account>-tokens.json` when `OUTLOOK_ACCOUNT_ID` is set for multi-account profiles, and refresh automatically.
 
 ### 3. Verify Access
 
@@ -301,7 +301,7 @@ Then try `search-emails` to confirm email access is working.
 **Fix**:
 1. Check that all required permissions are added (see [Step 3](#3-add-api-permissions))
 2. For work accounts: admin consent may be required — ask your IT admin
-3. Delete `~/.outlook-assistant-tokens.json` and re-authenticate to pick up new permissions
+3. Delete `~/.outlook-assistant-tokens.json`, or the matching `~/.outlook-assistant-<account>-tokens.json` profile file, and re-authenticate to pick up new permissions
 
 ---
 
@@ -309,10 +309,12 @@ Then try `search-emails` to confirm email access is working.
 
 **Cause**: Refresh tokens can expire after extended inactivity (90+ days) or when passwords change.
 
-**Fix**: Delete `~/.outlook-assistant-tokens.json` and re-authenticate:
+**Fix**: Delete `~/.outlook-assistant-tokens.json`, or the matching `~/.outlook-assistant-<account>-tokens.json` profile file, and re-authenticate:
 
 ```bash
 rm ~/.outlook-assistant-tokens.json
+# For named profiles, remove the matching file, for example:
+rm ~/.outlook-assistant-work-tokens.json
 npm run auth-server
 # Then use the auth tool with action=authenticate in your AI assistant
 ```
@@ -340,6 +342,8 @@ npm run auth-server
 
 ```bash
 rm ~/.outlook-assistant-tokens.json
+# For named profiles, remove the matching file, for example:
+rm ~/.outlook-assistant-work-tokens.json
 npm run auth-server
 # Then use the auth tool with action=authenticate in your AI assistant
 ```

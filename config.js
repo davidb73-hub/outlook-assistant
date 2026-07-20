@@ -44,6 +44,70 @@ const AUTH_AUDIENCE = process.env.OUTLOOK_AUTH_AUDIENCE || 'common';
 const DEFAULT_AUTH_METHOD = process.env.OUTLOOK_AUTH_METHOD || 'device-code';
 const CLIENT_CREDENTIALS_SCOPE = 'https://graph.microsoft.com/.default';
 
+function expandHomePath(value) {
+  if (!value) return value;
+  if (value === '~') return homeDir;
+  if (value.startsWith('~/') || value.startsWith('~\\')) {
+    return path.join(homeDir, value.slice(2));
+  }
+  return path.resolve(value);
+}
+
+function parseAccountId(value) {
+  if (!value) return null;
+  const accountId = value.trim();
+  if (!accountId) return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(accountId)) {
+    throw new Error(
+      'OUTLOOK_ACCOUNT_ID may only contain letters, numbers, dots, underscores, and hyphens. ' +
+        'Use a short label such as personal, work, or client-a.'
+    );
+  }
+  return accountId;
+}
+
+const ACCOUNT_ID = parseAccountId(process.env.OUTLOOK_ACCOUNT_ID);
+
+function buildTokenStorePath() {
+  if (process.env.OUTLOOK_TOKEN_STORE_PATH) {
+    return expandHomePath(process.env.OUTLOOK_TOKEN_STORE_PATH);
+  }
+  if (ACCOUNT_ID) {
+    return path.join(homeDir, `.outlook-assistant-${ACCOUNT_ID}-tokens.json`);
+  }
+  return path.join(homeDir, '.outlook-assistant-tokens.json');
+}
+
+function deriveDeviceCodeStatePath(tokenStorePath) {
+  const dir = path.dirname(tokenStorePath);
+  const base = path.basename(tokenStorePath);
+
+  if (base === '.outlook-assistant-tokens.json') {
+    return path.join(dir, '.outlook-assistant-pending-auth.json');
+  }
+
+  if (base.endsWith('-tokens.json')) {
+    return path.join(
+      dir,
+      `${base.slice(0, -'-tokens.json'.length)}-pending-auth.json`
+    );
+  }
+
+  if (base.endsWith('.json')) {
+    return path.join(
+      dir,
+      `${base.slice(0, -'.json'.length)}-pending-auth.json`
+    );
+  }
+
+  return `${tokenStorePath}.pending-auth`;
+}
+
+const TOKEN_STORE_PATH = buildTokenStorePath();
+const DEVICE_CODE_STATE_PATH = process.env.OUTLOOK_DEVICE_CODE_STATE_PATH
+  ? expandHomePath(process.env.OUTLOOK_DEVICE_CODE_STATE_PATH)
+  : deriveDeviceCodeStatePath(TOKEN_STORE_PATH);
+
 function parseExtraScopes(value) {
   if (!value) return [];
   return value
@@ -84,6 +148,7 @@ module.exports = {
 
   // Authentication configuration
   AUTH_CONFIG: {
+    accountId: ACCOUNT_ID,
     clientId: process.env.OUTLOOK_CLIENT_ID || '',
     clientSecret: process.env.OUTLOOK_CLIENT_SECRET || '',
     redirectUri: 'http://localhost:3333/auth/callback',
@@ -108,7 +173,8 @@ module.exports = {
       // 'Place.Read.All',     // find-meeting-rooms tool
       // 'User.Read.All',      // search-people manager/directReports actions
     ],
-    tokenStorePath: path.join(homeDir, '.outlook-assistant-tokens.json'),
+    tokenStorePath: TOKEN_STORE_PATH,
+    deviceCodeStatePath: DEVICE_CODE_STATE_PATH,
     authServerUrl: 'http://localhost:3333',
     audience: AUTH_AUDIENCE,
     deviceCodeEndpoint: `https://login.microsoftonline.com/${AUTH_AUDIENCE}/oauth2/v2.0/devicecode`,

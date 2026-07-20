@@ -357,6 +357,9 @@ USE_TEST_MODE=false
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `OUTLOOK_AUTH_AUDIENCE` | OAuth audience: `common`, `consumers` (personal-only Azure apps), `organizations`, or single-tenant GUID. Fixes `AADSTS9002331` for personal-only app registrations. | `common` |
+| `OUTLOOK_ACCOUNT_ID` | Short local label for this mailbox profile, used to isolate token and pending-auth files when you run multiple Outlook Assistant entries. Use letters, numbers, dots, underscores, or hyphens only. | unset |
+| `OUTLOOK_TOKEN_STORE_PATH` | Advanced override for the delegated OAuth token file. Usually prefer `OUTLOOK_ACCOUNT_ID`. | `~/.outlook-assistant-tokens.json` or `~/.outlook-assistant-<account>-tokens.json` |
+| `OUTLOOK_DEVICE_CODE_STATE_PATH` | Advanced override for the temporary device-code state file. Usually prefer `OUTLOOK_ACCOUNT_ID`. | derived from the token file |
 | `OUTLOOK_DEFAULT_TIMEZONE` | IANA timezone applied to calendar events when callers don't pass one (e.g. `Europe/London`, `America/New_York`). | `Australia/Melbourne` |
 | `OUTLOOK_MAX_EMAILS_PER_SESSION` | Cap on `send-email` + `draft send` per MCP server lifetime. | unlimited |
 | `OUTLOOK_ALLOWED_RECIPIENTS` | Comma-separated allowlist of domains/addresses for sends, drafts, and rule forwards. | unrestricted |
@@ -382,6 +385,52 @@ If installed from source, use `node` instead of `npx`:
 }
 ```
 
+### Multiple Email Accounts
+
+Run one MCP server entry per mailbox. Each entry should use a unique server name and a unique `OUTLOOK_ACCOUNT_ID`; that gives each account its own token file and device-code sign-in state.
+
+```json
+{
+  "mcpServers": {
+    "outlook-main": {
+      "command": "node",
+      "args": ["/path/to/outlook-assistant/index.js"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "main",
+        "OUTLOOK_CLIENT_ID": "your-application-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-domain.com,trusted@example.com"
+      }
+    },
+    "outlook-second": {
+      "command": "node",
+      "args": ["/path/to/outlook-assistant/index.js"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "second",
+        "OUTLOOK_CLIENT_ID": "your-application-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-domain.com,trusted@example.com"
+      }
+    },
+    "outlook-third": {
+      "command": "node",
+      "args": ["/path/to/outlook-assistant/index.js"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "third",
+        "OUTLOOK_CLIENT_ID": "your-application-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-domain.com,trusted@example.com"
+      }
+    }
+  }
+}
+```
+
+Authenticate each server entry separately. For example, ask your MCP client to authenticate `outlook-second`, complete the Microsoft device-code sign-in for that mailbox, then repeat for `outlook-third`.
+
 ## Authentication Flow
 
 ### Device Code Flow (Default — Recommended)
@@ -392,11 +441,11 @@ No auth server needed. Works everywhere, including remote/headless environments.
 2. Visit the URL shown (`microsoft.com/devicelogin`) on **any** browser, **any** device
 3. Enter the code, sign in with your Microsoft account, and grant permissions
 4. Tell your AI assistant to complete authentication (calls `auth` with `action=device-code-complete`)
-5. Tokens are saved to `~/.outlook-assistant-tokens.json` and **refresh automatically**
+5. Tokens are saved to `~/.outlook-assistant-tokens.json`, or to `~/.outlook-assistant-<account>-tokens.json` when `OUTLOOK_ACCOUNT_ID` is set, and **refresh automatically**
 
 > **Prerequisite**: Enable "Allow public client flows" in Azure Portal > your app > Authentication > Advanced settings.
 >
-> **Server restarts** (v3.7.2+): Device code state is persisted to `~/.outlook-assistant-pending-auth.json`, so `device-code-complete` works even if the MCP server restarts between steps 1 and 4 (e.g., Untether/Telegram bridge, Claude Desktop session changes).
+> **Server restarts** (v3.7.2+): Device code state is persisted to `~/.outlook-assistant-pending-auth.json`, or to an account-specific pending-auth file when `OUTLOOK_ACCOUNT_ID` is set, so `device-code-complete` works even if the MCP server restarts between steps 1 and 4 (e.g., Untether/Telegram bridge, Claude Desktop session changes).
 
 ### Browser Redirect Flow (Alternative)
 

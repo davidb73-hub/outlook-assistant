@@ -11,6 +11,26 @@
     "start": "node index.js",
     "auth-server": "node outlook-auth-server.js",
     "test-mode": "USE_TEST_MODE=true node index.js",
+    "triage:local": "node local-worker/index.js",
+    "triage:gmail-auth": "node local-worker/gmail-auth.js",
+    "triage:gmail-check": "node local-worker/gmail-check.js",
+    "archive:init": "node archive-worker/index.js init",
+    "archive:status": "node archive-worker/index.js status",
+    "archive:acceptance-status": "node archive-worker/index.js acceptance-status",
+    "archive:sync": "node archive-worker/index.js sync",
+    "archive:reconcile": "node archive-worker/index.js reconcile",
+    "archive:backfill-reset": "node archive-worker/index.js backfill-reset",
+    "archive:verify": "node archive-worker/index.js verify",
+    "archive:backup": "node archive-worker/index.js backup",
+    "archive:backup-status": "node archive-worker/index.js backup-status",
+    "archive:restore": "node archive-worker/index.js restore",
+    "archive:delivery-package": "node archive-worker/index.js build-delivery-package",
+    "archive:delivery-run": "node archive-worker/index.js delivery-run",
+    "archive:clean-install-check": "bash scripts/clean-install-check.sh",
+    "archive:schedule:install": "node scripts/install-email-archive-launchd.js",
+    "archive:scheduled-run": "node archive-worker/scheduled.js",
+    "archive:install": "npm install --prefix archive-worker",
+    "archive:test": "jest test/archive-worker --runInBand",
     "inspect": "npx @modelcontextprotocol/inspector node index.js",
     "test": "jest",
     "lint": "eslint .",
@@ -95,6 +115,7 @@
     "node": ">=18.18.0"
   },
   "overrides": {
-    "minimatch": ">=3.1.3"
+    "minimatch": ">=3.1.3",
+    "hono": "4.12.30"
   }
 }

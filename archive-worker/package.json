@@ -1,0 +1,13 @@
+{
+  "name": "@private/email-archive-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private deterministic Outlook and Gmail archival worker",
+  "main": "index.js",
+  "engines": {
+    "node": "20.x || 22.x || 24.x"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  }
+}

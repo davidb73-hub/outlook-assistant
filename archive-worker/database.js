@@ -1,0 +1,870 @@
+const fs = require('fs');
+const path = require('path');
+const Database = require('better-sqlite3');
+const { MIGRATIONS } = require('./migrations');
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function json(value) {
+  return value === undefined || value === null ? null : JSON.stringify(value);
+}
+
+function bool(value) {
+  if (value === undefined || value === null) return null;
+  return value ? 1 : 0;
+}
+
+function assertAccount(account) {
+  if (!account?.id || !account?.displayName) {
+    throw new Error('Archive account id and displayName are required');
+  }
+  if (!['outlook', 'gmail'].includes(account.provider)) {
+    throw new Error(`Unsupported archive provider: ${account.provider}`);
+  }
+}
+
+function assertMessage(message) {
+  if (!message?.providerMessageId) {
+    throw new Error('providerMessageId is required');
+  }
+}
+
+class ArchiveDatabase {
+  constructor(databasePath) {
+    // ':memory:' is a SQLite sentinel, not a path. Resolving it created a real
+    // 180KB database file at the repo root and made the in-memory tests measure
+    // disk I/O, which matters most for the controlled-latency benchmark.
+    const inMemory = databasePath === ':memory:';
+    this.databasePath = inMemory ? databasePath : path.resolve(databasePath);
+    if (!inMemory) {
+      fs.mkdirSync(path.dirname(this.databasePath), {
+        recursive: true,
+        mode: 0o700,
+      });
+    }
+    this.db = new Database(this.databasePath);
+    if (!inMemory) fs.chmodSync(this.databasePath, 0o600);
+    this.db.pragma('foreign_keys = ON');
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = FULL');
+    this.db.pragma('busy_timeout = 5000');
+    this.migrate();
+  }
+
+  migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    const applied = new Set(
+      this.db
+        .prepare('SELECT version FROM schema_migrations ORDER BY version')
+        .all()
+        .map((row) => row.version)
+    );
+
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.version)) continue;
+      this.db.transaction(() => {
+        this.db.exec(migration.sql);
+        this.db
+          .prepare(
+            'INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)'
+          )
+          .run(migration.version, migration.name, nowIso());
+      })();
+    }
+  }
+
+  upsertAccount(account) {
+    assertAccount(account);
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO accounts(id, provider, display_name, enabled, created_at, updated_at)
+         VALUES (@id, @provider, @displayName, 1, @timestamp, @timestamp)
+         ON CONFLICT(id) DO UPDATE SET
+           provider = excluded.provider,
+           display_name = excluded.display_name,
+           updated_at = excluded.updated_at`
+      )
+      .run({ ...account, timestamp });
+  }
+
+  upsertFolder(accountId, folder) {
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO folders(
+           account_id, provider_folder_id, display_name, kind, excluded, raw_json, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, provider_folder_id) DO UPDATE SET
+           display_name = excluded.display_name,
+           kind = excluded.kind,
+           excluded = excluded.excluded,
+           raw_json = excluded.raw_json,
+           last_seen_at = excluded.last_seen_at`
+      )
+      .run(
+        accountId,
+        folder.providerFolderId,
+        folder.displayName || '',
+        folder.kind || null,
+        bool(folder.excluded) || 0,
+        json(folder.raw),
+        timestamp
+      );
+  }
+
+  registerBlob(blob) {
+    this.db
+      .prepare(
+        `INSERT INTO blobs(hash, kind, relative_path, size, media_type, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET
+           size = excluded.size,
+           media_type = COALESCE(excluded.media_type, blobs.media_type)`
+      )
+      .run(
+        blob.hash,
+        blob.kind,
+        blob.relativePath,
+        blob.size,
+        blob.mediaType || null,
+        nowIso()
+      );
+  }
+
+  stageMessage(accountId, message, rawBlob) {
+    assertMessage(message);
+    const timestamp = nowIso();
+    const attachments = message.attachments || [];
+    const archiveState =
+      attachments.length > 0
+        ? 'archived_pending_attachments'
+        : 'archived_complete';
+
+    return this.db.transaction(() => {
+      if (rawBlob) this.registerBlob(rawBlob);
+
+      const result = this.db
+        .prepare(
+          `INSERT INTO messages(
+             account_id, provider_message_id, provider_thread_id, internet_message_id,
+             subject, sent_at, received_at, provider_created_at, provider_modified_at,
+             direction, body_text, body_html, body_content_type, body_preview,
+             importance, is_read, has_attachments, raw_blob_hash, source_json,
+             archive_state, current_eligible, deleted_remote,
+             first_archived_at, last_seen_at, updated_at
+           ) VALUES (
+             @accountId, @providerMessageId, @providerThreadId, @internetMessageId,
+             @subject, @sentAt, @receivedAt, @providerCreatedAt, @providerModifiedAt,
+             @direction, @bodyText, @bodyHtml, @bodyContentType, @bodyPreview,
+             @importance, @isRead, @hasAttachments, @rawBlobHash, @sourceJson,
+             @archiveState, @currentEligible, 0,
+             @timestamp, @timestamp, @timestamp
+           )
+           ON CONFLICT(account_id, provider_message_id) DO UPDATE SET
+             provider_thread_id = excluded.provider_thread_id,
+             internet_message_id = excluded.internet_message_id,
+             subject = excluded.subject,
+             sent_at = excluded.sent_at,
+             received_at = excluded.received_at,
+             provider_created_at = excluded.provider_created_at,
+             provider_modified_at = excluded.provider_modified_at,
+             direction = excluded.direction,
+             body_text = excluded.body_text,
+             body_html = excluded.body_html,
+             body_content_type = excluded.body_content_type,
+             body_preview = excluded.body_preview,
+             importance = excluded.importance,
+             is_read = excluded.is_read,
+             has_attachments = excluded.has_attachments,
+             raw_blob_hash = COALESCE(excluded.raw_blob_hash, messages.raw_blob_hash),
+             source_json = excluded.source_json,
+             current_eligible = excluded.current_eligible,
+             deleted_remote = 0,
+             last_seen_at = excluded.last_seen_at,
+             updated_at = excluded.updated_at
+           RETURNING id`
+        )
+        .get({
+          accountId,
+          providerMessageId: message.providerMessageId,
+          providerThreadId: message.providerThreadId || null,
+          internetMessageId: message.internetMessageId || null,
+          subject: message.subject || '',
+          sentAt: message.sentAt || null,
+          receivedAt: message.receivedAt || null,
+          providerCreatedAt: message.providerCreatedAt || null,
+          providerModifiedAt: message.providerModifiedAt || null,
+          direction: message.direction || 'unknown',
+          bodyText: message.bodyText || '',
+          bodyHtml: message.bodyHtml || '',
+          bodyContentType: message.bodyContentType || null,
+          bodyPreview: message.bodyPreview || '',
+          importance: message.importance || null,
+          isRead: bool(message.isRead),
+          hasAttachments: bool(
+            message.hasAttachments || attachments.length > 0
+          ),
+          rawBlobHash: rawBlob?.hash || null,
+          sourceJson: json(message.source),
+          archiveState,
+          currentEligible: message.currentEligible === false ? 0 : 1,
+          timestamp,
+        });
+
+      const messageId = result.id;
+      this.replaceRecipients(messageId, message.recipients || []);
+      this.replaceLocations(messageId, message.locations || [], timestamp);
+      this.upsertAttachments(messageId, attachments, timestamp);
+      this.refreshMessageState(messageId);
+      this.refreshFts(messageId, accountId, message);
+
+      return this.getMessageById(messageId);
+    })();
+  }
+
+  replaceRecipients(messageId, recipients) {
+    this.db
+      .prepare('DELETE FROM recipients WHERE message_id = ?')
+      .run(messageId);
+    const insert = this.db.prepare(
+      `INSERT INTO recipients(
+         message_id, recipient_type, ordinal, address, display_name
+       ) VALUES (?, ?, ?, ?, ?)`
+    );
+    recipients.forEach((recipient, index) => {
+      insert.run(
+        messageId,
+        recipient.type,
+        recipient.ordinal ?? index,
+        recipient.address || '',
+        recipient.displayName || ''
+      );
+    });
+  }
+
+  replaceLocations(messageId, locations, timestamp) {
+    this.db
+      .prepare('DELETE FROM message_locations WHERE message_id = ?')
+      .run(messageId);
+    const insert = this.db.prepare(
+      `INSERT INTO message_locations(
+         message_id, provider_location_id, display_name, kind, last_seen_at
+       ) VALUES (?, ?, ?, ?, ?)`
+    );
+    for (const location of locations) {
+      insert.run(
+        messageId,
+        location.providerLocationId,
+        location.displayName || '',
+        location.kind || null,
+        timestamp
+      );
+    }
+  }
+
+  upsertAttachments(messageId, attachments, timestamp) {
+    const statement = this.db.prepare(
+      `INSERT INTO attachments(
+         message_id, provider_attachment_id, file_name, media_type, size,
+         content_id, is_inline, archive_state, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+       ON CONFLICT(message_id, provider_attachment_id) DO UPDATE SET
+         file_name = excluded.file_name,
+         media_type = excluded.media_type,
+         size = excluded.size,
+         content_id = excluded.content_id,
+         is_inline = excluded.is_inline,
+         updated_at = excluded.updated_at`
+    );
+    for (const attachment of attachments) {
+      statement.run(
+        messageId,
+        attachment.providerAttachmentId,
+        attachment.fileName || '',
+        attachment.mediaType || null,
+        attachment.size ?? null,
+        attachment.contentId || null,
+        bool(attachment.isInline) || 0,
+        timestamp
+      );
+    }
+  }
+
+  refreshFts(messageId, accountId, message) {
+    this.db
+      .prepare('DELETE FROM messages_fts WHERE message_id = ?')
+      .run(messageId);
+    const participants = (message.recipients || [])
+      .flatMap((recipient) => [recipient.displayName, recipient.address])
+      .filter(Boolean)
+      .join(' ');
+    this.db
+      .prepare(
+        `INSERT INTO messages_fts(message_id, account_id, subject, body, participants)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        messageId,
+        accountId,
+        message.subject || '',
+        [message.bodyText, message.bodyPreview].filter(Boolean).join('\n'),
+        participants
+      );
+  }
+
+  completeAttachment(messageId, providerAttachmentId, blob) {
+    return this.db.transaction(() => {
+      this.registerBlob(blob);
+      const result = this.db
+        .prepare(
+          `UPDATE attachments
+           SET blob_hash = ?, archive_state = 'complete', last_error = NULL, updated_at = ?
+           WHERE message_id = ? AND provider_attachment_id = ?`
+        )
+        .run(blob.hash, nowIso(), messageId, providerAttachmentId);
+      if (result.changes !== 1) {
+        throw new Error('Attachment record was not found');
+      }
+      this.refreshMessageState(messageId);
+      return this.getMessageById(messageId);
+    })();
+  }
+
+  recordAttachmentSecurity(messageId, providerAttachmentId, result) {
+    const attachment = this.db
+      .prepare(
+        'SELECT id FROM attachments WHERE message_id = ? AND provider_attachment_id = ?'
+      )
+      .get(messageId, providerAttachmentId);
+    if (!attachment) throw new Error('Attachment record was not found');
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO attachment_security(attachment_id, status, scanner, scanner_version, reason, scanned_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(attachment_id) DO UPDATE SET status = excluded.status,
+         scanner = excluded.scanner, scanner_version = excluded.scanner_version,
+         reason = excluded.reason, scanned_at = excluded.scanned_at`
+      )
+      .run(
+        attachment.id,
+        result.status,
+        result.scanner,
+        result.scannerVersion || null,
+        result.reason || null,
+        timestamp
+      );
+    this.db
+      .prepare(
+        `INSERT INTO security_events(message_id, attachment_id, event_type, status, details_json, occurred_at)
+       VALUES (?, ?, 'attachment_scan', ?, ?, ?)`
+      )
+      .run(
+        messageId,
+        attachment.id,
+        result.status,
+        JSON.stringify(result),
+        timestamp
+      );
+    return result;
+  }
+
+  markAttachmentFailure(messageId, providerAttachmentId, errorMessage) {
+    this.db
+      .prepare(
+        `UPDATE attachments
+         SET archive_state = 'retryable_error', last_error = ?, updated_at = ?
+         WHERE message_id = ? AND provider_attachment_id = ?`
+      )
+      .run(
+        String(errorMessage).slice(0, 1000),
+        nowIso(),
+        messageId,
+        providerAttachmentId
+      );
+    this.refreshMessageState(messageId);
+  }
+
+  refreshMessageState(messageId) {
+    const pending = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM attachments
+         WHERE message_id = ? AND archive_state != 'complete'`
+      )
+      .get(messageId).count;
+    const archiveState =
+      pending > 0 ? 'archived_pending_attachments' : 'archived_complete';
+    this.db
+      .prepare(
+        'UPDATE messages SET archive_state = ?, updated_at = ? WHERE id = ?'
+      )
+      .run(archiveState, nowIso(), messageId);
+  }
+
+  enqueueDelivery(messageId, destinations, packageRoot = null) {
+    const timestamp = nowIso();
+    const insert = this.db.prepare(
+      `INSERT INTO delivery_jobs(message_id, destination, package_root, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(message_id, destination) DO UPDATE SET package_root = COALESCE(excluded.package_root, delivery_jobs.package_root)`
+    );
+    const event = this.db.prepare(
+      `INSERT INTO delivery_events(delivery_job_id, event_type, details_json, occurred_at)
+       VALUES (?, 'enqueued', ?, ?)`
+    );
+    return this.db.transaction(() =>
+      destinations.map((destination) => {
+        insert.run(messageId, destination, packageRoot, timestamp, timestamp);
+        const job = this.db
+          .prepare(
+            'SELECT id FROM delivery_jobs WHERE message_id = ? AND destination = ?'
+          )
+          .get(messageId, destination);
+        event.run(job.id, JSON.stringify({ destination }), timestamp);
+        return job.id;
+      })
+    )();
+  }
+
+  listDeliveryJobs(status = null) {
+    if (status) {
+      return this.db
+        .prepare(
+          'SELECT * FROM delivery_jobs WHERE status = ? ORDER BY updated_at'
+        )
+        .all(status);
+    }
+    return this.db
+      .prepare('SELECT * FROM delivery_jobs ORDER BY updated_at')
+      .all();
+  }
+
+  listMessagesArchivedSince(timestamp) {
+    return this.db
+      .prepare(
+        'SELECT id FROM messages WHERE first_archived_at >= ? ORDER BY id'
+      )
+      .all(timestamp)
+      .map((row) => this.getMessageById(row.id));
+  }
+
+  proposeDeliveries(messageId, triage) {
+    const unsafe = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM attachments a
+       LEFT JOIN attachment_security s ON s.attachment_id = a.id
+       WHERE a.message_id = ? AND (a.archive_state != 'complete' OR s.status != 'safe')`
+      )
+      .get(messageId).count;
+    if (unsafe > 0) {
+      return {
+        status: 'review',
+        reason: 'attachments-not-security-approved',
+        jobs: [],
+      };
+    }
+    if (triage.disposition !== 'proposed' || !triage.destinations?.length) {
+      return {
+        status: 'review',
+        reason: triage.reason || 'triage-review-required',
+        jobs: [],
+      };
+    }
+    return {
+      status: 'proposed',
+      reason: triage.reason,
+      jobs: this.enqueueDelivery(messageId, triage.destinations),
+    };
+  }
+
+  updateDeliveryJob(jobId, status, details = {}) {
+    const allowed = new Set([
+      'pending',
+      'running',
+      'delivered',
+      'rejected',
+      'failed',
+      'review',
+    ]);
+    if (!allowed.has(status)) {
+      throw new Error(`Unsupported delivery status: ${status}`);
+    }
+    const timestamp = nowIso();
+    const result = this.db
+      .prepare(
+        `UPDATE delivery_jobs SET status = ?, attempts = attempts + ?,
+         manifest_digest = COALESCE(?, manifest_digest),
+         destination_record_id = COALESCE(?, destination_record_id),
+         last_error = ?, updated_at = ? WHERE id = ?`
+      )
+      .run(
+        status,
+        status === 'running' ? 1 : 0,
+        details.manifestDigest || null,
+        details.destinationRecordId || null,
+        details.error || null,
+        timestamp,
+        jobId
+      );
+    if (result.changes !== 1) {
+      throw new Error(`Delivery job not found: ${jobId}`);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO delivery_events(delivery_job_id, event_type, details_json, occurred_at)
+       VALUES (?, ?, ?, ?)`
+      )
+      .run(jobId, status, JSON.stringify(details), timestamp);
+    return this.db
+      .prepare('SELECT * FROM delivery_jobs WHERE id = ?')
+      .get(jobId);
+  }
+
+  recordTombstone(accountId, providerMessageId, details = {}) {
+    return this.db.transaction(() => {
+      const message = this.db
+        .prepare(
+          `SELECT id FROM messages
+           WHERE account_id = ? AND provider_message_id = ?`
+        )
+        .get(accountId, providerMessageId);
+      if (!message) return false;
+      const timestamp = nowIso();
+      this.db
+        .prepare(
+          `UPDATE messages
+           SET current_eligible = 0, deleted_remote = 1, last_seen_at = ?, updated_at = ?
+           WHERE id = ?`
+        )
+        .run(timestamp, timestamp, message.id);
+      this.db
+        .prepare(
+          `INSERT INTO message_events(message_id, event_type, occurred_at, details_json)
+           VALUES (?, 'remote_deletion', ?, ?)`
+        )
+        .run(message.id, timestamp, json(details));
+      return true;
+    })();
+  }
+
+  getMessageById(messageId) {
+    const message = this.db
+      .prepare('SELECT * FROM messages WHERE id = ?')
+      .get(messageId);
+    if (!message) return null;
+    message.recipients = this.db
+      .prepare(
+        `SELECT recipient_type, ordinal, address, display_name
+         FROM recipients WHERE message_id = ? ORDER BY recipient_type, ordinal`
+      )
+      .all(messageId);
+    message.locations = this.db
+      .prepare(
+        `SELECT provider_location_id, display_name, kind
+         FROM message_locations WHERE message_id = ? ORDER BY provider_location_id`
+      )
+      .all(messageId);
+    message.attachments = this.db
+      .prepare(
+        `SELECT provider_attachment_id, file_name, media_type, size, content_id,
+                is_inline, blob_hash, archive_state, last_error
+         FROM attachments WHERE message_id = ? ORDER BY provider_attachment_id`
+      )
+      .all(messageId);
+    return message;
+  }
+
+  getMessage(accountId, providerMessageId) {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM messages
+         WHERE account_id = ? AND provider_message_id = ?`
+      )
+      .get(accountId, providerMessageId);
+    return row ? this.getMessageById(row.id) : null;
+  }
+
+  search(
+    query,
+    { accountId = null, limit = 50, after = null, before = null } = {}
+  ) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+    const afterIso = after ? this.normalizedSearchDate(after, 'after') : null;
+    const beforeIso = before
+      ? this.normalizedSearchDate(before, 'before')
+      : null;
+    if (!query || !query.trim()) {
+      if (!afterIso && !beforeIso) return [];
+      return this.db
+        .prepare(
+          `SELECT m.id, m.account_id, m.provider_message_id, m.subject,
+                  m.received_at, m.sent_at, m.archive_state, m.current_eligible,
+                  NULL AS rank
+           FROM messages m
+           WHERE (? IS NULL OR m.account_id = ?)
+             AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) >= ?)
+             AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) < ?)
+           ORDER BY COALESCE(m.received_at, m.sent_at) DESC
+           LIMIT ?`
+        )
+        .all(
+          accountId,
+          accountId,
+          afterIso,
+          afterIso,
+          beforeIso,
+          beforeIso,
+          safeLimit
+        );
+    }
+    return this.db
+      .prepare(
+        `SELECT m.id, m.account_id, m.provider_message_id, m.subject,
+                m.received_at, m.sent_at, m.archive_state, m.current_eligible,
+                bm25(messages_fts) AS rank
+         FROM messages_fts
+         JOIN messages m ON m.id = messages_fts.message_id
+         WHERE messages_fts MATCH ?
+           AND (? IS NULL OR m.account_id = ?)
+           AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) >= ?)
+           AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) < ?)
+         ORDER BY rank, COALESCE(m.received_at, m.sent_at) DESC
+         LIMIT ?`
+      )
+      .all(
+        query,
+        accountId,
+        accountId,
+        afterIso,
+        afterIso,
+        beforeIso,
+        beforeIso,
+        safeLimit
+      );
+  }
+
+  normalizedSearchDate(value, label) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid ${label} search date: ${value}`);
+    }
+    return date.toISOString();
+  }
+
+  setCursor(accountId, scope, cursor, metadata = null) {
+    this.db
+      .prepare(
+        `INSERT INTO sync_cursors(account_id, scope, cursor, status, metadata_json, updated_at)
+         VALUES (?, ?, ?, 'ready', ?, ?)
+         ON CONFLICT(account_id, scope) DO UPDATE SET
+           cursor = excluded.cursor,
+           status = excluded.status,
+           metadata_json = excluded.metadata_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(accountId, scope, cursor, json(metadata), nowIso());
+  }
+
+  getCursor(accountId, scope) {
+    return (
+      this.db
+        .prepare(
+          `SELECT cursor, status, metadata_json, updated_at
+           FROM sync_cursors WHERE account_id = ? AND scope = ?`
+        )
+        .get(accountId, scope) || null
+    );
+  }
+
+  clearCursor(accountId, scope) {
+    return this.db
+      .prepare('DELETE FROM sync_cursors WHERE account_id = ? AND scope = ?')
+      .run(accountId, scope).changes;
+  }
+
+  beginRun(accountId, runType, details = null) {
+    return this.db
+      .prepare(
+        `INSERT INTO ingestion_runs(
+           account_id, run_type, started_at, status, details_json
+         ) VALUES (?, ?, ?, 'running', ?)`
+      )
+      .run(accountId || null, runType, nowIso(), json(details)).lastInsertRowid;
+  }
+
+  finishRun(runId, status, counts = {}, details = null) {
+    if (!['completed', 'failed', 'interrupted'].includes(status)) {
+      throw new Error(`Invalid ingestion run status: ${status}`);
+    }
+    this.db
+      .prepare(
+        `UPDATE ingestion_runs
+         SET finished_at = ?, status = ?, discovered_count = ?,
+             archived_count = ?, error_count = ?, details_json = ?
+         WHERE id = ?`
+      )
+      .run(
+        nowIso(),
+        status,
+        counts.discovered || 0,
+        counts.archived || 0,
+        counts.errors || 0,
+        json(details),
+        runId
+      );
+  }
+
+  interruptRunningRuns(reason = 'worker_recovered_after_interruption') {
+    return this.db
+      .prepare(
+        `UPDATE ingestion_runs
+         SET finished_at = ?, status = 'interrupted',
+             details_json = COALESCE(details_json, ?)
+         WHERE status = 'running'`
+      )
+      .run(nowIso(), json({ reason })).changes;
+  }
+
+  recordIngestionError({
+    runId = null,
+    accountId = null,
+    providerMessageId = null,
+    stage,
+    code = null,
+    message,
+    retryable = true,
+  }) {
+    this.db
+      .prepare(
+        `INSERT INTO ingestion_errors(
+           run_id, account_id, provider_message_id, stage, error_code,
+           error_message, retryable, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        runId,
+        accountId,
+        providerMessageId,
+        stage,
+        code,
+        String(message || 'Unknown ingestion error').slice(0, 1000),
+        retryable ? 1 : 0,
+        nowIso()
+      );
+  }
+
+  resolveIngestionErrors(accountId, providerMessageId) {
+    this.db
+      .prepare(
+        `UPDATE ingestion_errors
+         SET resolved_at = ?
+         WHERE account_id = ? AND provider_message_id = ? AND resolved_at IS NULL`
+      )
+      .run(nowIso(), accountId, providerMessageId);
+  }
+
+  listProviderMessageIds(accountId, { currentEligible = null } = {}) {
+    return this.db
+      .prepare(
+        `SELECT provider_message_id
+         FROM messages
+         WHERE account_id = ?
+           AND (? IS NULL OR current_eligible = ?)
+         ORDER BY provider_message_id`
+      )
+      .all(accountId, currentEligible, currentEligible)
+      .map((row) => row.provider_message_id);
+  }
+
+  pendingAttachments(accountId, limit = 100) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 1000));
+    return this.db
+      .prepare(
+        `SELECT a.*, m.provider_message_id, m.account_id
+         FROM attachments a
+         JOIN messages m ON m.id = a.message_id
+         WHERE m.account_id = ? AND a.archive_state != 'complete'
+         ORDER BY a.updated_at, a.id
+         LIMIT ?`
+      )
+      .all(accountId, safeLimit);
+  }
+
+  recentRuns(limit = 20) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 200));
+    return this.db
+      .prepare(
+        `SELECT id, account_id, run_type, started_at, finished_at, status,
+                discovered_count, archived_count, error_count, details_json
+         FROM ingestion_runs ORDER BY id DESC LIMIT ?`
+      )
+      .all(safeLimit);
+  }
+
+  unresolvedErrors(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+    return this.db
+      .prepare(
+        `SELECT id, run_id, account_id, provider_message_id, stage,
+                error_code, error_message, retryable, created_at
+         FROM ingestion_errors
+         WHERE resolved_at IS NULL
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(safeLimit);
+  }
+
+  listBlobs() {
+    return this.db
+      .prepare(
+        `SELECT hash, kind, relative_path, size, media_type
+         FROM blobs ORDER BY kind, hash`
+      )
+      .all();
+  }
+
+  status() {
+    return {
+      integrity: this.db.pragma('integrity_check', { simple: true }),
+      accounts: this.db
+        .prepare(
+          `SELECT a.id, a.provider, a.display_name,
+                  COUNT(m.id) AS message_count,
+                  COALESCE(SUM(CASE WHEN m.archive_state = 'archived_complete' THEN 1 ELSE 0 END), 0) AS complete_count,
+                  COALESCE(SUM(CASE WHEN m.archive_state = 'archived_pending_attachments' THEN 1 ELSE 0 END), 0) AS pending_count,
+                  COALESCE(SUM(CASE WHEN m.deleted_remote = 1 THEN 1 ELSE 0 END), 0) AS tombstone_count
+           FROM accounts a
+           LEFT JOIN messages m ON m.account_id = a.id
+           GROUP BY a.id
+           ORDER BY a.id`
+        )
+        .all(),
+      recentRuns: this.recentRuns(10),
+      unresolvedErrors: this.unresolvedErrors(20),
+    };
+  }
+
+  checkpoint() {
+    return this.db.pragma('wal_checkpoint(TRUNCATE)');
+  }
+
+  close() {
+    this.db.close();
+  }
+}
+
+module.exports = {
+  ArchiveDatabase,
+  assertAccount,
+  assertMessage,
+  nowIso,
+};

@@ -449,6 +449,8 @@ describe('handleListEmailsDelta', () => {
     expect(result.content[0].text).toContain('Initial');
     expect(result._meta.syncType).toBe('initial');
     expect(result._meta.itemCount).toBe(2);
+    expect(result._meta.emails).toHaveLength(2);
+    expect(result._meta.emails[0].id).toBe('msg-1');
     expect(result._meta.deltaToken).toBe(
       'https://graph.microsoft.com/delta?token=abc'
     );

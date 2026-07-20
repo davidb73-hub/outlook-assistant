@@ -12,10 +12,12 @@ const {
 } = require('./client-credentials');
 
 // Path for persisting device code state across MCP server restarts
-const DEVICE_CODE_STATE_PATH = path.join(
-  process.env.HOME || process.env.USERPROFILE,
-  '.outlook-assistant-pending-auth.json'
-);
+const DEVICE_CODE_STATE_PATH =
+  config.AUTH_CONFIG.deviceCodeStatePath ||
+  path.join(
+    process.env.HOME || process.env.USERPROFILE,
+    '.outlook-assistant-pending-auth.json'
+  );
 
 // Dynamic tool count — set by index.js after TOOLS array is built
 let _toolCount = 0;
@@ -479,7 +481,7 @@ const authTools = [
   {
     name: 'auth',
     description:
-      'Manage authentication with the Microsoft Graph API. action=`status` (default) returns the current auth state and auto-refreshes the access token if possible — call this first to check before other tools. action=`authenticate` starts auth: `method: "device-code"` (default, delegated/headless) returns a code + URL; `method: "browser"` uses the local auth server on :3333; `method: "client-credentials"` validates certificate-based app-only auth configured via OUTLOOK_TENANT_ID, OUTLOOK_CERT_PATH, OUTLOOK_KEY_PATH, and OUTLOOK_TARGET_USER. action=`device-code-complete` finishes device-code auth after browser sign-in. action=`about` returns server version, auth method, configured audience, scopes, and diagnostics. Delegated tokens persist to `~/.outlook-assistant-tokens.json`; app-only tokens are cached in memory only.',
+      'Manage authentication with the Microsoft Graph API. action=`status` (default) returns the current auth state and auto-refreshes the access token if possible — call this first to check before other tools. action=`authenticate` starts auth: `method: "device-code"` (default, delegated/headless) returns a code + URL; `method: "browser"` uses the local auth server on :3333; `method: "client-credentials"` validates certificate-based app-only auth configured via OUTLOOK_TENANT_ID, OUTLOOK_CERT_PATH, OUTLOOK_KEY_PATH, and OUTLOOK_TARGET_USER. action=`device-code-complete` finishes device-code auth after browser sign-in. action=`about` returns server version, auth method, configured audience, scopes, and diagnostics. Delegated tokens persist to `~/.outlook-assistant-tokens.json` by default, or to an account-specific file when OUTLOOK_ACCOUNT_ID/OUTLOOK_TOKEN_STORE_PATH is set; app-only tokens are cached in memory only.',
     annotations: {
       title: 'Authentication',
       readOnlyHint: false,

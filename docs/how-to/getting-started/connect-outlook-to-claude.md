@@ -102,6 +102,60 @@ Add to your `.mcp.json` or project settings:
 
 Any MCP-compatible client can use Outlook Assistant. Set the command to `npx -y @littlebearapps/outlook-assistant` and pass `OUTLOOK_CLIENT_ID`, `OUTLOOK_AUTH_METHOD=device-code`, and the safety variables. Add `OUTLOOK_AUTH_AUDIENCE=<tenant-guid>` only for single-tenant app registrations.
 
+## Connect Multiple Email Accounts
+
+Outlook Assistant connects one mailbox per MCP server entry. To connect more mailboxes, copy the server entry once per account, give each entry a distinct name, and set a unique `OUTLOOK_ACCOUNT_ID` for each one.
+
+```json
+{
+  "mcpServers": {
+    "outlook-main": {
+      "command": "npx",
+      "args": ["-y", "@littlebearapps/outlook-assistant"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "main",
+        "OUTLOOK_CLIENT_ID": "your-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-email@example.com"
+      }
+    },
+    "outlook-second": {
+      "command": "npx",
+      "args": ["-y", "@littlebearapps/outlook-assistant"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "second",
+        "OUTLOOK_CLIENT_ID": "your-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-email@example.com"
+      }
+    },
+    "outlook-third": {
+      "command": "npx",
+      "args": ["-y", "@littlebearapps/outlook-assistant"],
+      "env": {
+        "OUTLOOK_ACCOUNT_ID": "third",
+        "OUTLOOK_CLIENT_ID": "your-client-id",
+        "OUTLOOK_AUTH_METHOD": "device-code",
+        "OUTLOOK_MAX_EMAILS_PER_SESSION": "10",
+        "OUTLOOK_ALLOWED_RECIPIENTS": "your-email@example.com"
+      }
+    }
+  }
+}
+```
+
+Each profile stores delegated tokens separately:
+
+```text
+~/.outlook-assistant-main-tokens.json
+~/.outlook-assistant-second-tokens.json
+~/.outlook-assistant-third-tokens.json
+```
+
+After updating your MCP client config, restart the client and authenticate each entry separately. Use a private/incognito browser window for each Microsoft device-code sign-in so the browser does not silently reuse the wrong account.
+
 ## Authenticate for the First Time
 
 ### Device Code Flow (Recommended)
@@ -124,7 +178,7 @@ Your AI assistant will call the `auth` tool with `action: authenticate`. You'll 
 
 ![Microsoft permissions consent screen during OAuth](../../assets/screenshots/connect-outlook-to-claude-02.png)
 
-4. Tell your AI assistant you've completed sign-in. It will call `auth` with `action: device-code-complete` to finish authentication. Tokens are saved to `~/.outlook-assistant-tokens.json`.
+4. Tell your AI assistant you've completed sign-in. It will call `auth` with `action: device-code-complete` to finish authentication. Tokens are saved to `~/.outlook-assistant-tokens.json`, or to an account-specific file such as `~/.outlook-assistant-work-tokens.json` when `OUTLOOK_ACCOUNT_ID` is set.
 
 > **Server restarts** (v3.7.2+): Device code state is persisted to disk, so `device-code-complete` works even if the MCP server restarts between steps 1 and 4.
 
@@ -148,7 +202,7 @@ npx @littlebearapps/outlook-assistant auth-server
 
 Your AI assistant will call the `auth` tool with `action: authenticate, method: browser` and return a URL.
 
-3. Open the URL in your browser, sign in, and grant permissions. After granting access, the browser redirects to `localhost:3333` and tokens are saved automatically to `~/.outlook-assistant-tokens.json`.
+3. Open the URL in your browser, sign in, and grant permissions. After granting access, the browser redirects to `localhost:3333` and tokens are saved automatically to `~/.outlook-assistant-tokens.json`, or to the account-specific token file when `OUTLOOK_ACCOUNT_ID` is set.
 
 4. You can stop the auth server after authentication succeeds.
 
@@ -189,7 +243,7 @@ If you see your recent emails, everything is connected.
 | `EADDRINUSE :3333` | Run `npx kill-port 3333` then restart the auth server |
 | Auth URL doesn't open | Start the auth server first with `npx @littlebearapps/outlook-assistant auth-server` |
 | Permissions error after login | Check API permissions in Azure Portal and grant admin consent if required |
-| Token file not found | Tokens are stored at `~/.outlook-assistant-tokens.json` — check the file exists after auth |
+| Token file not found | Tokens are stored at `~/.outlook-assistant-tokens.json` by default, or `~/.outlook-assistant-<account>-tokens.json` for named profiles — check the expected file exists after auth |
 
 ## Related
 

@@ -59,7 +59,7 @@ Client credentials app-only auth is different: it uses Microsoft Graph applicati
 
 ## Where are my tokens stored, and what happens when they expire?
 
-For device-code and browser auth, access and refresh tokens are stored at **`~/.outlook-assistant-tokens.json`** with file mode `0o600` (owner read/write only). Token refresh is automatic — the access token (~60 minutes) refreshes transparently via the stored refresh token, so the only time you'll re-authenticate is when the **refresh token expires (~90 days)**. From v3.7.2 onward, refresh works correctly for both public and confidential client flows.
+For device-code and browser auth, access and refresh tokens are stored at **`~/.outlook-assistant-tokens.json`** by default with file mode `0o600` (owner read/write only). If you set `OUTLOOK_ACCOUNT_ID` for multiple mailbox profiles, each profile uses its own file such as **`~/.outlook-assistant-work-tokens.json`**. Token refresh is automatic — the access token (~60 minutes) refreshes transparently via the stored refresh token, so the only time you'll re-authenticate is when the **refresh token expires (~90 days)**. From v3.7.2 onward, refresh works correctly for both public and confidential client flows.
 
 If tokens get corrupted or stuck:
 
@@ -68,7 +68,7 @@ rm ~/.outlook-assistant-tokens.json ~/.outlook-assistant-pending-auth.json
 # Then call the auth tool again with action=authenticate
 ```
 
-The pending-auth file (also at `~/.outlook-assistant-pending-auth.json`, also `0o600`) only exists between calling `authenticate` and `device-code-complete` — its purpose is to make device-code auth survive MCP server restarts (Untether/Telegram bridges, Claude Desktop session changes, etc.).
+The pending-auth file (also at `~/.outlook-assistant-pending-auth.json`, or `~/.outlook-assistant-<account>-pending-auth.json` for named profiles, also `0o600`) only exists between calling `authenticate` and `device-code-complete` — its purpose is to make device-code auth survive MCP server restarts (Untether/Telegram bridges, Claude Desktop session changes, etc.).
 
 Client credentials app-only auth does not store refresh tokens. It reads a local certificate/private key, requests short-lived app-only access tokens from Microsoft, and caches those access tokens in memory only.
 
@@ -97,7 +97,7 @@ Microsoft does not offer a "shared multi-tenant client ID" that any open-source 
 
 ## What's the difference between device code and browser authentication?
 
-**Device code flow (default in v3.1.0+, recommended)** doesn't need an auth server, port forwarding, or local browser — you call `auth action=authenticate`, visit a URL on any device with the displayed code, sign in, then call `auth action=device-code-complete`. It works headless, over SSH, and through remote bridges like Telegram. Device code state is persisted to `~/.outlook-assistant-pending-auth.json` so the flow survives MCP server restarts (a real issue for hosts that restart between tool calls; fixed in v3.7.2).
+**Device code flow (default in v3.1.0+, recommended)** doesn't need an auth server, port forwarding, or local browser — you call `auth action=authenticate`, visit a URL on any device with the displayed code, sign in, then call `auth action=device-code-complete`. It works headless, over SSH, and through remote bridges like Telegram. Device code state is persisted to `~/.outlook-assistant-pending-auth.json`, or to a profile-specific pending-auth file when `OUTLOOK_ACCOUNT_ID` is set, so the flow survives MCP server restarts (a real issue for hosts that restart between tool calls; fixed in v3.7.2).
 
 **Browser redirect flow (optional)** runs a local auth server on port 3333 and uses the standard OAuth redirect URI (`http://localhost:3333/auth/callback`). Convenient on a graphical workstation, but it needs an open port and a local browser — neither is available in many MCP host environments. Start it with `npm run auth-server`, then call `auth action=authenticate method=browser`.
 
@@ -121,6 +121,8 @@ Three steps, in any order:
 2. **Delete local tokens and pending auth state**:
    ```bash
    rm -f ~/.outlook-assistant-tokens.json ~/.outlook-assistant-pending-auth.json
+   # For named profiles, remove the matching files, for example:
+   rm -f ~/.outlook-assistant-work-tokens.json ~/.outlook-assistant-work-pending-auth.json
    ```
 3. **Revoke the Azure app's access to your account.** For personal Microsoft accounts, visit <https://account.live.com/consent/manage>; for work/school accounts, your tenant admin's "Enterprise applications" console. Removing the app revokes any outstanding refresh tokens immediately. If the Azure app registration is yours and no longer needed, you can delete it from <https://portal.azure.com/> > App registrations.
 
