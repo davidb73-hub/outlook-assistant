@@ -1,6 +1,20 @@
 const crypto = require('crypto');
+const path = require('path');
 
 const DELIVERY_SCHEMA = 'email-assistant.delivery.v1';
+
+// An attachment filename is attacker-controlled (it comes verbatim from the inbound
+// email). It is later joined into a filesystem path when the delivery package is built,
+// so anything other than a plain basename — separators, a `..` segment, an absolute
+// path — could escape the package directory. A safe name is one that survives
+// path.basename() unchanged and is not a relative-traversal token.
+function isSafeAttachmentName(fileName) {
+  if (typeof fileName !== 'string' || fileName === '') return false;
+  if (fileName.includes('/') || fileName.includes('\\')) return false;
+  if (fileName.includes('\0')) return false;
+  if (fileName === '.' || fileName === '..') return false;
+  return path.basename(fileName) === fileName;
+}
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -57,6 +71,9 @@ function validateDeliveryManifest(manifest) {
     if (!['safe'].includes(attachment.security_status)) {
       errors.push(`attachment-not-safe:${attachment.file_name}`);
     }
+    if (!isSafeAttachmentName(attachment.file_name)) {
+      errors.push(`unsafe-attachment-name:${attachment.file_name}`);
+    }
   }
   if (!Array.isArray(manifest?.proposed_destinations)) {
     errors.push('destinations-not-array');
@@ -75,4 +92,5 @@ module.exports = {
   createDeliveryManifest,
   validateDeliveryManifest,
   manifestDigest,
+  isSafeAttachmentName,
 };

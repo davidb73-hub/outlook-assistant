@@ -5,6 +5,18 @@ const {
   manifestDigest,
 } = require('./delivery-contract');
 
+// Resolve `child` under `root` and refuse anything that escapes it. This is the same
+// containment check used by storage.verify(); the delivery path needs it independently
+// because an attachment filename is attacker-controlled and reaches a path.join sink.
+function containedPath(root, child) {
+  const absolute = path.resolve(root, child);
+  const relative = path.relative(root, absolute);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Refusing path outside package root: ${child}`);
+  }
+  return absolute;
+}
+
 async function copyVerified(source, destination, expectedHash, hashFn) {
   const content = await fs.readFile(source);
   if (hashFn(content) !== expectedHash) {
@@ -54,12 +66,12 @@ async function buildDeliveryPackage({
         `Missing attachment path: ${attachment.archive_attachment_id}`
       );
     }
-    await copyVerified(
-      source,
-      path.join(packageRoot, 'attachments', attachment.file_name),
-      attachment.blob_sha256,
-      hashFn
+    const attachmentsDir = path.join(packageRoot, 'attachments');
+    const destination = containedPath(
+      attachmentsDir,
+      path.basename(attachment.file_name)
     );
+    await copyVerified(source, destination, attachment.blob_sha256, hashFn);
   }
   await fs.writeFile(
     path.join(packageRoot, 'manifest.json'),
