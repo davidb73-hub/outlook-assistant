@@ -339,6 +339,82 @@ class ArchiveDatabase {
     })();
   }
 
+  /**
+   * Domains you have actually sent mail to — the known-correspondent signal.
+   *
+   * The triage router's known-correspondent veto read `message.knownDomains`, which no
+   * production caller ever supplied, so the veto never fired and every message took an
+   * unconditional confidence penalty. The comment claimed "the CRM already knows every
+   * client domain, so this needs no new data" — true, and never wired to anything.
+   *
+   * Outbound mail is a better source than the CRM anyway, and it is already here: you
+   * do not send email to marketing lists, so a domain in your Sent items is a genuine
+   * correspondent. Derived from ~1.7k outbound messages, ~155 distinct domains.
+   *
+   * Cached for the process lifetime — this is a slow-moving set and the classifier runs
+   * once per archived message.
+   */
+  getKnownDomains() {
+    if (this._knownDomains) return this._knownDomains;
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT lower(substr(r.address, instr(r.address, '@') + 1)) AS domain
+           FROM recipients r
+           JOIN messages m ON m.id = r.message_id
+          WHERE m.direction = 'outbound'
+            AND r.recipient_type IN ('to', 'cc')
+            AND instr(r.address, '@') > 0`
+      )
+      .all();
+    this._knownDomains = rows.map((r) => r.domain).filter(Boolean);
+    return this._knownDomains;
+  }
+
+  /**
+   * Look up a security verdict by CONTENT hash.
+   *
+   * Identical bytes have an identical verdict, so a signature image that appears in
+   * 369 messages is scanned once rather than 369 times. Returns null when this
+   * content has never been scanned.
+   */
+  getBlobSecurity(blobHash) {
+    if (!blobHash) return null;
+    const row = this.db
+      .prepare(
+        'SELECT status, scanner, scanner_version, reason FROM attachment_security_blob WHERE blob_hash = ?'
+      )
+      .get(blobHash);
+    if (!row) return null;
+    return {
+      status: row.status,
+      scanner: row.scanner,
+      scannerVersion: row.scanner_version,
+      reason: row.reason,
+      fromCache: true,
+    };
+  }
+
+  /** Record a verdict against content, so every future occurrence reuses it. */
+  recordBlobSecurity(blobHash, result) {
+    if (!blobHash) return;
+    this.db
+      .prepare(
+        `INSERT INTO attachment_security_blob(blob_hash, status, scanner, scanner_version, reason, scanned_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(blob_hash) DO UPDATE SET status = excluded.status,
+         scanner = excluded.scanner, scanner_version = excluded.scanner_version,
+         reason = excluded.reason, scanned_at = excluded.scanned_at`
+      )
+      .run(
+        blobHash,
+        result.status,
+        result.scanner,
+        result.scannerVersion ?? null,
+        result.reason ?? null,
+        nowIso()
+      );
+  }
+
   recordAttachmentSecurity(messageId, providerAttachmentId, result) {
     const attachment = this.db
       .prepare(
@@ -455,6 +531,28 @@ class ArchiveDatabase {
       )
       .all(timestamp)
       .map((row) => this.getMessageById(row.id));
+  }
+
+  /**
+   * Attachments that are fully archived but hold no terminal security verdict — the
+   * backfill scanner's work list. Covers rows never scanned (bulk hydrate/backfill left
+   * ~20k with no attachment_security row) and rows stuck on the non-terminal
+   * 'scanner_unavailable' from a past ClamAV outage.
+   */
+  listAttachmentsPendingSecurity(limit = 500) {
+    return this.db
+      .prepare(
+        `SELECT a.id, a.message_id, a.provider_attachment_id, a.file_name, a.blob_hash
+           FROM attachments a
+           LEFT JOIN attachment_security s ON s.attachment_id = a.id
+          WHERE a.archive_state = 'complete'
+            AND a.blob_hash IS NOT NULL
+            AND (s.attachment_id IS NULL
+                 OR s.status NOT IN ('safe', 'quarantined', 'blocked'))
+          ORDER BY a.id
+          LIMIT ?`
+      )
+      .all(limit);
   }
 
   proposeDeliveries(messageId, triage) {

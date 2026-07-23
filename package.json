@@ -20,6 +20,7 @@
     "archive:sync": "node archive-worker/index.js sync",
     "archive:reconcile": "node archive-worker/index.js reconcile",
     "archive:backfill-reset": "node archive-worker/index.js backfill-reset",
+    "archive:backfill-scans": "node archive-worker/index.js backfill-scans",
     "archive:verify": "node archive-worker/index.js verify",
     "archive:backup": "node archive-worker/index.js backup",
     "archive:backup-status": "node archive-worker/index.js backup-status",

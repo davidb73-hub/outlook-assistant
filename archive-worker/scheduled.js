@@ -7,7 +7,7 @@ const { WorkerLock } = require('./lock');
 const { notifyArchiveFailure } = require('./notifier');
 const { DeliveryWorker } = require('./delivery-worker');
 const { createFilesystemAdapter } = require('./filesystem-adapters');
-const { routeArchivedMessage } = require('./routing-orchestrator');
+const { routeArchivedMessageSafely } = require('./routing-orchestrator');
 const { classifyWithLocalLLM } = require('./local-llm-triage');
 const { sha256 } = require('./storage');
 
@@ -68,7 +68,7 @@ async function runScheduled(env = process.env) {
           );
         }
       }
-      const route = await routeArchivedMessage({
+      const route = await routeArchivedMessageSafely({
         message: {
           ...message,
           accountId: message.account_id,
@@ -103,11 +103,23 @@ async function runScheduled(env = process.env) {
             endpoint: env.LOCAL_LLM_ENDPOINT || undefined,
             model: env.LOCAL_LLM_MODEL || undefined,
           }),
+      }, (error, failed) => {
+        // Record and move on — one message must not fail the whole run.
+        archive.database.recordIngestionError({
+          runId: null,
+          accountId: failed.accountId,
+          providerMessageId: failed.providerMessageId,
+          stage: 'routing',
+          code: error.code || 'ROUTE_FAILED',
+          message: error.message,
+          retryable: true,
+        });
       });
       routed.push({
         messageId: message.id,
         status: route.status,
         destinations: route.triage?.destinations || [],
+        error: route.error?.message || undefined,
       });
     }
     const reconciliations = [];

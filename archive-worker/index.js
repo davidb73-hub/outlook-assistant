@@ -14,6 +14,7 @@ const {
   readLatencySamples,
 } = require('./controlled-latency');
 const { remapGmailIdentityIds } = require('./remap-gmail-identities');
+const { backfillAttachmentScans } = require('./backfill-attachment-scans');
 const { buildDeliveryPackage } = require('./delivery-package');
 const { sha256 } = require('./storage');
 const { DeliveryWorker } = require('./delivery-worker');
@@ -252,6 +253,23 @@ async function main() {
           2
         )
       );
+      return;
+    }
+    if (args.command === 'backfill-scans') {
+      const summary = await backfillAttachmentScans({
+        database: archive.database,
+        contentStore: archive.contentStore,
+        clamscanPath: archive.config.clamScanPath,
+        batchSize: Number(args.flags.batch) || 500,
+        onProgress: (running) => {
+          if ((running.scanned + running.cached) % 500 === 0) {
+            process.stderr.write(
+              `  scanned ${running.scanned}, cached ${running.cached}…\n`
+            );
+          }
+        },
+      });
+      console.log(JSON.stringify(summary, null, 2));
       return;
     }
     if (args.command === 'backup-status') {
