@@ -3,6 +3,9 @@ const os = require('os');
 const path = require('path');
 const { ArchiveService } = require('../../archive-worker/archive-service');
 const { ArchiveDatabase } = require('../../archive-worker/database');
+const {
+  isCacheableBlobVerdict,
+} = require('../../archive-worker/security-gate');
 const { ContentStore, sha256 } = require('../../archive-worker/storage');
 
 // Scanning was keyed to attachment_id, so identical content was rescanned for every
@@ -177,5 +180,29 @@ describe('attachment security verdicts are keyed to content, not occurrence', ()
     expect(ctx.db.getBlobSecurity(contentHash)).toEqual(
       expect.objectContaining({ status: 'safe', scanner: 'clamav' })
     );
+  });
+});
+
+describe('only content-derived security verdicts are reusable by hash', () => {
+  test.each(['safe', 'quarantined'])('%s is cacheable', (status) => {
+    expect(isCacheableBlobVerdict({ status, scanner: 'clamav' })).toBe(true);
+  });
+
+  test.each(['blocked', 'scanner_unavailable', 'pending'])(
+    '%s is not cacheable',
+    (status) => {
+      expect(
+        isCacheableBlobVerdict({
+          status,
+          scanner: status === 'blocked' ? 'policy' : 'clamav',
+        })
+      ).toBe(false);
+    }
+  );
+
+  test('a malformed verdict is not cacheable', () => {
+    for (const verdict of [null, undefined, {}, { status: 'unexpected' }]) {
+      expect(isCacheableBlobVerdict(verdict)).toBe(false);
+    }
   });
 });
