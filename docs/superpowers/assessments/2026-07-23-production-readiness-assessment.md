@@ -164,6 +164,12 @@ work_done_this_session:
   - "Root-caused the failure notifications; shipped per-message isolation + backfill scanner (commit 8bcee29)."
   - "Backfill of unscanned attachments running detached; ~10k/23k scanned at assessment time."
 priority_order: [F1, F2, F3, F7, F4, F5, F6, F9, F8, F10]
+remediation_outcomes:
+  - finding_id: F1
+    outcome: fixed
+    date: 2026-07-23
+    note: "Initialised command-centre Git repository, committed the approved 41-file baseline as 197ec56, tagged baseline-pre-production-2026-07-23, and verified the working tree is clean."
+    verification: "git log returned 197ec56; git status --short returned no output; baseline tag exists"
 ---
 
 # Production-Readiness Assessment — Local Email Archive + Draft-Reply System
@@ -230,3 +236,11 @@ egress; local-first LLM posture; the path-traversal fix landed this session.
    `Write` for `docs/faq/faq.md` (a protected file); do not delete `docs/faq/`.
 5. Post-op: append your outcomes per finding (`fixed` / `skipped` / `no_change_needed`) so
    the loop is auditable, and re-run the `verify` line for each finding you touch.
+
+## Remediation outcomes
+
+- **F1 — fixed (2026-07-23).** Initialised the command-centre Git repository with the
+  owner-approved ignore rules and exact baseline file list. Created commit `197ec56`
+  (`chore: establish command-centre baseline`) and tag
+  `baseline-pre-production-2026-07-23`. Verification: `git log` returned the baseline
+  commit, `git status --short` returned no output, and the tag exists.
