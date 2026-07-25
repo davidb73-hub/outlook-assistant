@@ -70,10 +70,16 @@ function buildArchiveConfig(env = process.env) {
           'ruvocal',
           'email-inbox'
         ),
+      // LOCAL tree, not OneDrive. The VitaSci platform moved on 2026-07-20 because
+      // background reads from the FileProvider mount fail with EDEADLK. Its delivery
+      // adapter now runs from ~/Developer/01-Vitasci, so packages written to the old
+      // OneDrive path were never acknowledged — 25 packages sat there against 7
+      // receipts while the adapter processed a different directory entirely.
       'vitasci-crm':
         env.EMAIL_ARCHIVE_VITASCI_INBOX ||
         path.join(
-          DEFAULT_ONEDRIVE_ROOT,
+          os.homedir(),
+          'Developer',
           '01-Vitasci',
           '_status',
           'email-assistant-inbox'
@@ -110,7 +116,8 @@ function buildArchiveConfig(env = process.env) {
       'vitasci-crm':
         env.EMAIL_ARCHIVE_VITASCI_RECEIPTS ||
         path.join(
-          DEFAULT_ONEDRIVE_ROOT,
+          os.homedir(),
+          'Developer',
           '01-Vitasci',
           '_status',
           'email-assistant-receipts'

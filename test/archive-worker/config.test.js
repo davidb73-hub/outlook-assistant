@@ -1,3 +1,5 @@
+const os = require('os');
+const path = require('path');
 const { buildArchiveConfig } = require('../../archive-worker/config');
 
 describe('archive account identity mapping', () => {
@@ -16,6 +18,29 @@ describe('archive account identity mapping', () => {
           accountKey: 'ablative',
         }),
       ])
+    );
+  });
+
+  test('uses the live local VitaSci delivery and receipt directories by default', () => {
+    const config = buildArchiveConfig({});
+    const localStatusRoot = path.join(
+      os.homedir(),
+      'Developer',
+      '01-Vitasci',
+      '_status'
+    );
+
+    expect(config.deliveryDestinations['vitasci-crm']).toBe(
+      path.join(localStatusRoot, 'email-assistant-inbox')
+    );
+    expect(config.deliveryReceiptRoots['vitasci-crm']).toBe(
+      path.join(localStatusRoot, 'email-assistant-receipts')
+    );
+    expect(config.deliveryDestinations['vitasci-crm']).not.toContain(
+      `${path.sep}CloudStorage${path.sep}`
+    );
+    expect(config.deliveryReceiptRoots['vitasci-crm']).not.toContain(
+      `${path.sep}CloudStorage${path.sep}`
     );
   });
 });
