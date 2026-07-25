@@ -5,6 +5,7 @@ const {
   MAX_LOG_BYTES,
   appendOperationalLog,
   eventExitCode,
+  scheduledStatus,
 } = require('../../archive-worker/scheduled');
 const { WorkerLock } = require('../../archive-worker/lock');
 const {
@@ -71,7 +72,42 @@ describe('unattended archive operations', () => {
 
   test('returns a failing service exit code for visible account or backup failure', () => {
     expect(eventExitCode({ status: 'completed' })).toBe(0);
+    expect(eventExitCode({ status: 'degraded' })).toBe(0);
     expect(eventExitCode({ status: 'failed' })).toBe(1);
+  });
+
+  test('keeps one rate-limited account visible without reporting a whole-job crash', () => {
+    const accounts = [
+      { accountId: 'vitasci-outlook', status: 'completed' },
+      {
+        accountId: 'gmail-ablative',
+        status: 'rate_limited',
+        error: { code: 429, retryable: true },
+      },
+      { accountId: 'gmail-personal', status: 'completed' },
+    ];
+
+    expect(scheduledStatus(accounts, [], { status: 'not_due' })).toBe(
+      'degraded'
+    );
+    expect(
+      scheduledStatus(
+        accounts.map((result) => ({ ...result, status: 'completed' })),
+        [{ accountId: 'gmail-ablative', status: 'rate_limited' }],
+        { status: 'not_due' }
+      )
+    ).toBe('degraded');
+    expect(
+      scheduledStatus(
+        accounts.map((result) =>
+          result.accountId === 'gmail-ablative'
+            ? { ...result, status: 'failed', error: { code: 'GMAIL_AUTH' } }
+            : result
+        ),
+        [],
+        { status: 'not_due' }
+      )
+    ).toBe('failed');
   });
 
   test('generates a 15-minute user LaunchAgent without a shell', () => {
@@ -79,10 +115,15 @@ describe('unattended archive operations', () => {
       nodePath: '/opt/homebrew/bin/node',
       workerPath: '/safe/archive-worker/scheduled.js',
       workingDirectory: '/safe/repository',
+      standardOutPath: '/safe/logs/archive-worker.out.log',
+      standardErrorPath: '/safe/logs/archive-worker.err.log',
     });
     expect(output).toContain(`<string>${LABEL}</string>`);
     expect(output).toContain('<integer>900</integer>');
     expect(output).toContain('/safe/archive-worker/scheduled.js');
+    expect(output).toContain('/safe/logs/archive-worker.out.log');
+    expect(output).toContain('/safe/logs/archive-worker.err.log');
+    expect(output).not.toContain('/dev/null');
     expect(output).not.toContain('/bin/sh');
     expect(escapeXml('one&two<three')).toBe('one&amp;two&lt;three');
   });

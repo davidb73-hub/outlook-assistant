@@ -59,6 +59,29 @@ describe('provider HTTP safety and recovery', () => {
     ).rejects.toThrow('outside https://provider.example');
   });
 
+  test('supports bounded exponential backoff with jitter when retry-after is absent', async () => {
+    const sleep = jest.fn();
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 429))
+      .mockResolvedValueOnce(jsonResponse({}, 429))
+      .mockResolvedValueOnce(jsonResponse({ value: [] }));
+    const client = new ProviderHttpClient({
+      baseUrl: 'https://provider.example/v1/',
+      fetchImpl,
+      getAccessToken: jest.fn().mockResolvedValue('token'),
+      sleep,
+      maxRetries: 2,
+      retryBaseMs: 1000,
+      maxRetryDelayMs: 64_000,
+      retryJitterMs: 1000,
+      random: () => 0.25,
+    });
+
+    await client.request('messages');
+    expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1250, 2250]);
+  });
+
   test('aborts a stalled provider request with a retryable timeout', async () => {
     const fetchImpl = jest.fn(
       (_url, { signal }) =>
@@ -92,6 +115,28 @@ describe('provider HTTP safety and recovery', () => {
 });
 
 describe('Gmail archive provider', () => {
+  test('uses a Gmail-specific bounded exponential retry budget', () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-ablative',
+        provider: 'gmail',
+        displayName: 'Ablative Gmail',
+        accountKey: 'personal',
+      },
+      env: {},
+      fetchImpl: jest.fn(),
+    });
+
+    expect(provider.http).toEqual(
+      expect.objectContaining({
+        maxRetries: 6,
+        retryBaseMs: 1000,
+        maxRetryDelayMs: 64_000,
+        retryJitterMs: 1000,
+      })
+    );
+  });
+
   function providerWithHttp(request) {
     return new GmailArchiveProvider({
       account: {

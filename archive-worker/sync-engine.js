@@ -1,3 +1,6 @@
+const INGESTION_ERROR_RECORDED = Symbol('ingestionErrorRecorded');
+const UNAGGREGATED_ERROR_COUNT = Symbol('unaggregatedErrorCount');
+
 function metadata(cursorRow) {
   if (!cursorRow?.metadata_json) return {};
   try {
@@ -13,6 +16,22 @@ function safeError(error) {
     message: error.message,
     retryable: error.retryable !== false,
   };
+}
+
+function isGmailRateLimit(account, error) {
+  return (
+    account.provider === 'gmail' &&
+    (Number(error?.status) === 429 || Number(error?.code) === 429)
+  );
+}
+
+function markIngestionErrorRecorded(error, unaggregatedErrors = 0) {
+  if (error && (typeof error === 'object' || typeof error === 'function')) {
+    error[INGESTION_ERROR_RECORDED] = true;
+    error[UNAGGREGATED_ERROR_COUNT] =
+      Number(error[UNAGGREGATED_ERROR_COUNT] || 0) + unaggregatedErrors;
+  }
+  return error;
 }
 
 class ArchiveSyncEngine {
@@ -49,7 +68,6 @@ class ArchiveSyncEngine {
     const unique = new Map(refs.map((ref) => [ref.id, ref]));
     const staged = [];
     const recordArchiveError = (error, message, stage) => {
-      counts.errors += 1;
       this.recordError(
         runId,
         account.id,
@@ -57,6 +75,10 @@ class ArchiveSyncEngine {
         stage,
         error
       );
+      if (isGmailRateLimit(account, error)) {
+        throw markIngestionErrorRecorded(error, counts.errors);
+      }
+      counts.errors += 1;
     };
 
     for (const ref of unique.values()) {
@@ -87,8 +109,11 @@ class ArchiveSyncEngine {
           });
           continue;
         }
-        counts.errors += 1;
         this.recordError(runId, account.id, ref.id, 'message_fetch', error);
+        if (isGmailRateLimit(account, error)) {
+          throw markIngestionErrorRecorded(error, counts.errors);
+        }
+        counts.errors += 1;
       }
     }
 
@@ -127,8 +152,11 @@ class ArchiveSyncEngine {
           this.database.recordTombstone(account.id, removal.id, removal);
         }
       } catch (error) {
-        errors += 1;
         this.recordError(runId, account.id, removal.id, 'tombstone', error);
+        if (isGmailRateLimit(account, error)) {
+          throw markIngestionErrorRecorded(error, errors);
+        }
+        errors += 1;
       }
     }
     if (bundles.length > 0) {
@@ -178,12 +206,19 @@ class ArchiveSyncEngine {
         incrementalPage.refs,
         runId
       );
-      incremental.errors += await this.processTombstones(
-        account,
-        provider,
-        incrementalPage.tombstones,
-        runId
-      );
+      try {
+        incremental.errors += await this.processTombstones(
+          account,
+          provider,
+          incrementalPage.tombstones,
+          runId
+        );
+      } catch (error) {
+        if (error?.[INGESTION_ERROR_RECORDED]) {
+          throw markIngestionErrorRecorded(error, incremental.errors);
+        }
+        throw error;
+      }
       Object.keys(counts).forEach(
         (key) => (counts[key] += incremental[key] || 0)
       );
@@ -258,15 +293,21 @@ class ArchiveSyncEngine {
       this.database.finishRun(runId, status, counts, details);
       return { accountId: account.id, status, ...counts, details };
     } catch (error) {
-      counts.errors += 1;
-      this.recordError(runId, account.id, null, 'account_cycle', error);
+      const unaggregatedErrors = Number(error?.[UNAGGREGATED_ERROR_COUNT] || 0);
+      const hadOtherErrors = counts.errors + unaggregatedErrors > 0;
+      counts.errors += unaggregatedErrors + 1;
+      const rateLimited = isGmailRateLimit(account, error) && !hadOtherErrors;
+      if (!error?.[INGESTION_ERROR_RECORDED] && !rateLimited) {
+        this.recordError(runId, account.id, null, 'account_cycle', error);
+      }
       this.database.finishRun(runId, 'failed', counts, {
         ...details,
         failure: safeError(error),
+        outcome: rateLimited ? 'rate_limited' : 'failed',
       });
       return {
         accountId: account.id,
-        status: 'failed',
+        status: rateLimited ? 'rate_limited' : 'failed',
         ...counts,
         error: safeError(error),
       };
@@ -372,14 +413,20 @@ class ArchiveSyncEngine {
       }
       return { accountId: account.id, status, ...counts, ...details };
     } catch (error) {
-      counts.errors += 1;
-      this.recordError(runId, account.id, null, 'reconciliation', error);
+      const unaggregatedErrors = Number(error?.[UNAGGREGATED_ERROR_COUNT] || 0);
+      const hadOtherErrors = counts.errors + unaggregatedErrors > 0;
+      counts.errors += unaggregatedErrors + 1;
+      const rateLimited = isGmailRateLimit(account, error) && !hadOtherErrors;
+      if (!error?.[INGESTION_ERROR_RECORDED] && !rateLimited) {
+        this.recordError(runId, account.id, null, 'reconciliation', error);
+      }
       this.database.finishRun(runId, 'failed', counts, {
         failure: safeError(error),
+        outcome: rateLimited ? 'rate_limited' : 'failed',
       });
       return {
         accountId: account.id,
-        status: 'failed',
+        status: rateLimited ? 'rate_limited' : 'failed',
         ...counts,
         error: safeError(error),
       };
@@ -389,6 +436,7 @@ class ArchiveSyncEngine {
 
 module.exports = {
   ArchiveSyncEngine,
+  isGmailRateLimit,
   metadata,
   safeError,
 };

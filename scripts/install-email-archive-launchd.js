@@ -22,6 +22,20 @@ function plist({
   workerPath,
   workingDirectory,
   intervalSeconds = 900,
+  standardOutPath = path.join(
+    os.homedir(),
+    'Library',
+    'Logs',
+    'vitasci',
+    'email-assistant-archive.out.log'
+  ),
+  standardErrorPath = path.join(
+    os.homedir(),
+    'Library',
+    'Logs',
+    'vitasci',
+    'email-assistant-archive.err.log'
+  ),
 }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,9 +61,9 @@ function plist({
   <key>ThrottleInterval</key>
   <integer>60</integer>
   <key>StandardOutPath</key>
-  <string>/dev/null</string>
+  <string>${escapeXml(standardOutPath)}</string>
   <key>StandardErrorPath</key>
-  <string>/dev/null</string>
+  <string>${escapeXml(standardErrorPath)}</string>
 </dict>
 </plist>
 `;
@@ -89,16 +103,20 @@ async function install({
 } = {}) {
   const launchAgents = path.join(home, 'Library', 'LaunchAgents');
   const plistPath = path.join(launchAgents, `${LABEL}.plist`);
+  const logsDir = path.join(home, 'Library', 'Logs', 'vitasci');
   const workerPath = path.join(repoRoot, 'archive-worker', 'scheduled.js');
   const resolvedNodePath = nodePath || (await preferredNodePath());
   await fs.access(workerPath);
   await fs.mkdir(launchAgents, { recursive: true, mode: 0o700 });
+  await fs.mkdir(logsDir, { recursive: true, mode: 0o700 });
   await fs.writeFile(
     plistPath,
     plist({
       nodePath: resolvedNodePath,
       workerPath,
       workingDirectory: repoRoot,
+      standardOutPath: path.join(logsDir, 'email-assistant-archive.out.log'),
+      standardErrorPath: path.join(logsDir, 'email-assistant-archive.err.log'),
     }),
     { mode: 0o600 }
   );

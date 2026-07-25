@@ -36,6 +36,14 @@ class GmailArchiveProvider {
         baseUrl: GMAIL_API,
         getAccessToken: (forceRefresh) => this.getAccessToken(forceRefresh),
         fetchImpl,
+        // Gmail's documented policy starts exponential backoff at one second,
+        // adds up to one second of jitter, and typically caps at 32 or 64
+        // seconds. Six bounded retries give a transient quota window time to
+        // clear without holding the 15-minute worker indefinitely.
+        maxRetries: 6,
+        retryBaseMs: 1000,
+        maxRetryDelayMs: 64_000,
+        retryJitterMs: 1000,
       });
   }
 

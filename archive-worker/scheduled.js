@@ -40,6 +40,25 @@ async function appendOperationalLog(config, event) {
   await fs.chmod(logPath, 0o600);
 }
 
+function scheduledStatus(results, reconciliations, backup) {
+  if (backup.status === 'failed') return 'failed';
+  if (
+    results.some(
+      (result) => !['completed', 'rate_limited'].includes(result.status)
+    ) ||
+    reconciliations.some(
+      (result) => !['completed', 'rate_limited'].includes(result.status)
+    )
+  ) {
+    return 'failed';
+  }
+  return [...results, ...reconciliations].some(
+    (result) => result.status === 'rate_limited'
+  )
+    ? 'degraded'
+    : 'completed';
+}
+
 async function runScheduled(env = process.env) {
   const startedAt = new Date();
   const config = buildArchiveConfig(env);
@@ -68,53 +87,56 @@ async function runScheduled(env = process.env) {
           );
         }
       }
-      const route = await routeArchivedMessageSafely({
-        message: {
-          ...message,
-          accountId: message.account_id,
-          providerMessageId: message.provider_message_id,
-          providerThreadId: message.provider_thread_id,
-          rawBlobHash: message.raw_blob_hash,
-          bodyText: message.body_text,
-          attachments: (message.attachments || []).map((attachment) => ({
-            id: attachment.id,
-            fileName: attachment.file_name,
-            mediaType: attachment.media_type,
-            blobHash: attachment.blob_hash,
-            size: attachment.size,
-            securityStatus:
-              archive.database.db
-                .prepare(
-                  'SELECT status FROM attachment_security WHERE attachment_id = ?'
-                )
-                .get(attachment.id)?.status || 'unscanned',
-          })),
+      const route = await routeArchivedMessageSafely(
+        {
+          message: {
+            ...message,
+            accountId: message.account_id,
+            providerMessageId: message.provider_message_id,
+            providerThreadId: message.provider_thread_id,
+            rawBlobHash: message.raw_blob_hash,
+            bodyText: message.body_text,
+            attachments: (message.attachments || []).map((attachment) => ({
+              id: attachment.id,
+              fileName: attachment.file_name,
+              mediaType: attachment.media_type,
+              blobHash: attachment.blob_hash,
+              size: attachment.size,
+              securityStatus:
+                archive.database.db
+                  .prepare(
+                    'SELECT status FROM attachment_security WHERE attachment_id = ?'
+                  )
+                  .get(attachment.id)?.status || 'unscanned',
+            })),
+          },
+          rawMessagePath: archive.contentStore.blobPath(
+            'raw-message',
+            message.raw_blob_hash
+          ),
+          attachmentPaths,
+          database: archive.database,
+          outputRoot: path.join(config.root, 'delivery-packages'),
+          hashFn: sha256,
+          classifier: (candidate) =>
+            classifyWithLocalLLM(candidate, {
+              endpoint: env.LOCAL_LLM_ENDPOINT || undefined,
+              model: env.LOCAL_LLM_MODEL || undefined,
+            }),
         },
-        rawMessagePath: archive.contentStore.blobPath(
-          'raw-message',
-          message.raw_blob_hash
-        ),
-        attachmentPaths,
-        database: archive.database,
-        outputRoot: path.join(config.root, 'delivery-packages'),
-        hashFn: sha256,
-        classifier: (candidate) =>
-          classifyWithLocalLLM(candidate, {
-            endpoint: env.LOCAL_LLM_ENDPOINT || undefined,
-            model: env.LOCAL_LLM_MODEL || undefined,
-          }),
-      }, (error, failed) => {
-        // Record and move on — one message must not fail the whole run.
-        archive.database.recordIngestionError({
-          runId: null,
-          accountId: failed.accountId,
-          providerMessageId: failed.providerMessageId,
-          stage: 'routing',
-          code: error.code || 'ROUTE_FAILED',
-          message: error.message,
-          retryable: true,
-        });
-      });
+        (error, failed) => {
+          // Record and move on — one message must not fail the whole run.
+          archive.database.recordIngestionError({
+            runId: null,
+            accountId: failed.accountId,
+            providerMessageId: failed.providerMessageId,
+            stage: 'routing',
+            code: error.code || 'ROUTE_FAILED',
+            message: error.message,
+            retryable: true,
+          });
+        }
+      );
       routed.push({
         messageId: message.id,
         status: route.status,
@@ -175,7 +197,7 @@ async function runScheduled(env = process.env) {
     const event = {
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startedAt.getTime(),
-      status: allHealthy && backup.status !== 'failed' ? 'completed' : 'failed',
+      status: scheduledStatus(results, reconciliations, backup),
       backup,
       deliveries: deliveries.map((delivery) => ({
         id: delivery.id,
@@ -199,6 +221,7 @@ async function runScheduled(env = process.env) {
         archived: result.archived,
         errors: result.errors,
         errorCode: result.error?.code || null,
+        retryable: result.error?.retryable ?? null,
       })),
     };
     if (event.status === 'failed') {
@@ -226,7 +249,7 @@ async function runScheduled(env = process.env) {
 }
 
 function eventExitCode(event) {
-  return event.status === 'completed' ? 0 : 1;
+  return ['completed', 'degraded'].includes(event.status) ? 0 : 1;
 }
 
 if (require.main === module) {
@@ -246,4 +269,5 @@ module.exports = {
   eventExitCode,
   rotateLog,
   runScheduled,
+  scheduledStatus,
 };

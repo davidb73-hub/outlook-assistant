@@ -5,6 +5,9 @@ const { ArchiveService } = require('../../archive-worker/archive-service');
 const { ArchiveDatabase } = require('../../archive-worker/database');
 const { ContentStore } = require('../../archive-worker/storage');
 const { ArchiveSyncEngine } = require('../../archive-worker/sync-engine');
+const {
+  ProviderHttpError,
+} = require('../../archive-worker/providers/http-client');
 
 function message(id, subject = id, attachments = []) {
   return {
@@ -161,6 +164,109 @@ describe('archive sync engine', () => {
     ]);
   });
 
+  test('isolates an exhausted Gmail 429 while healthy accounts still complete', async () => {
+    const accounts = [
+      {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+      },
+      {
+        id: 'gmail-ablative',
+        provider: 'gmail',
+        displayName: 'Ablative Gmail',
+      },
+      {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+      },
+    ];
+    await service.initialise(accounts);
+    const providers = new Map(
+      accounts.map((candidate) => [candidate.id, providerFixture([])])
+    );
+    providers.get('gmail-ablative').fetchBundle.mockRejectedValue(
+      new ProviderHttpError('Gmail request exhausted its retry budget', {
+        status: 429,
+        code: 429,
+        retryable: true,
+      })
+    );
+    const engine = new ArchiveSyncEngine({
+      database,
+      service,
+      config: {
+        accounts,
+        incrementalBatchSize: 10,
+        backfillBatchSize: 10,
+        attachmentRetryBatchSize: 10,
+      },
+      providerFactory: (candidate) => providers.get(candidate.id),
+    });
+
+    await expect(engine.runAll()).resolves.toEqual([
+      expect.objectContaining({
+        accountId: 'vitasci-outlook',
+        status: 'completed',
+      }),
+      expect.objectContaining({
+        accountId: 'gmail-ablative',
+        status: 'rate_limited',
+        errors: 1,
+        error: expect.objectContaining({ code: 429, retryable: true }),
+      }),
+      expect.objectContaining({
+        accountId: 'gmail-personal',
+        status: 'completed',
+      }),
+    ]);
+    expect(
+      providers.get('gmail-ablative').listIncrementalPage
+    ).not.toHaveBeenCalled();
+    expect(
+      providers.get('gmail-personal').listIncrementalPage
+    ).toHaveBeenCalled();
+    expect(database.unresolvedErrors()).toEqual([
+      expect.objectContaining({
+        account_id: 'gmail-ablative',
+        provider_message_id: 'new-message',
+        error_code: expect.stringMatching(/^429/),
+      }),
+    ]);
+  });
+
+  test('does not let a later Gmail 429 hide an earlier real account error', async () => {
+    const provider = providerFixture([]);
+    provider.listRecent.mockResolvedValue([
+      { id: 'ordinary-failure' },
+      { id: 'rate-limit' },
+    ]);
+    provider.fetchBundle.mockImplementation((ref) => {
+      if (ref.id === 'ordinary-failure') {
+        const error = new Error('fixture parse failed');
+        error.code = 'INVALID_FIXTURE';
+        error.retryable = false;
+        throw error;
+      }
+      throw new ProviderHttpError('Gmail request exhausted its retry budget', {
+        status: 429,
+        code: 429,
+        retryable: true,
+      });
+    });
+
+    const [result] = await engineFor(provider).runAll();
+    expect(result).toEqual(
+      expect.objectContaining({
+        accountId: 'gmail-personal',
+        status: 'failed',
+        errors: 2,
+      })
+    );
+    expect(provider.listIncrementalPage).not.toHaveBeenCalled();
+  });
+
   test('stages every message before fetching a large attachment', async () => {
     const attachment = {
       providerAttachmentId: 'large-attachment',
@@ -285,6 +391,29 @@ describe('archive sync engine', () => {
         completedBy: 'full_reconciliation',
       })
     );
+  });
+
+  test('reports a reconciliation 429 as rate-limited rather than failed', async () => {
+    const provider = providerFixture([]);
+    provider.refreshLocations.mockRejectedValue(
+      new ProviderHttpError('Gmail request exhausted its retry budget', {
+        status: 429,
+        code: 429,
+        retryable: true,
+      })
+    );
+
+    await expect(
+      engineFor(provider).reconcileAccount(account)
+    ).resolves.toEqual(
+      expect.objectContaining({
+        accountId: 'gmail-personal',
+        status: 'rate_limited',
+        errors: 1,
+        error: expect.objectContaining({ code: 429, retryable: true }),
+      })
+    );
+    expect(database.unresolvedErrors()).toEqual([]);
   });
 
   test('a clean full reconciliation safely completes a partial backfill', async () => {

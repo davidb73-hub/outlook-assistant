@@ -8,12 +8,26 @@ class ProviderHttpError extends Error {
   }
 }
 
-function retryDelay(response, attempt) {
-  const retryAfter = Number.parseInt(response.headers.get('retry-after'), 10);
+function retryDelay(
+  response,
+  attempt,
+  {
+    retryBaseMs = 500,
+    maxRetryDelayMs = 30_000,
+    retryJitterMs = 0,
+    random = Math.random,
+  } = {}
+) {
+  const retryAfter = Number.parseInt(
+    response.headers?.get?.('retry-after'),
+    10
+  );
   if (Number.isFinite(retryAfter) && retryAfter >= 0) {
-    return Math.min(retryAfter * 1000, 60_000);
+    return Math.min(retryAfter * 1000, maxRetryDelayMs);
   }
-  return Math.min(500 * 2 ** attempt, 30_000);
+  const randomFraction = Math.max(0, Math.min(1, Number(random()) || 0));
+  const jitter = Math.floor(randomFraction * retryJitterMs);
+  return Math.min(retryBaseMs * 2 ** attempt + jitter, maxRetryDelayMs);
 }
 
 function safeErrorCode(body) {
@@ -33,6 +47,10 @@ class ProviderHttpClient {
     maxRetries = 4,
     requestTimeoutMs = 5 * 60 * 1000,
     defaultHeaders = {},
+    retryBaseMs = 500,
+    maxRetryDelayMs = 30_000,
+    retryJitterMs = 0,
+    random = Math.random,
   }) {
     this.baseUrl = new URL(baseUrl);
     this.getAccessToken = getAccessToken;
@@ -41,6 +59,10 @@ class ProviderHttpClient {
     this.maxRetries = maxRetries;
     this.requestTimeoutMs = Math.max(1, Number(requestTimeoutMs) || 1);
     this.defaultHeaders = defaultHeaders;
+    this.retryBaseMs = retryBaseMs;
+    this.maxRetryDelayMs = maxRetryDelayMs;
+    this.retryJitterMs = retryJitterMs;
+    this.random = random;
   }
 
   resolveUrl(pathOrUrl) {
@@ -115,7 +137,14 @@ class ProviderHttpClient {
 
       const retryable = response.status === 429 || response.status >= 500;
       if (retryable && attempt < this.maxRetries) {
-        await this.sleep(retryDelay(response, attempt));
+        await this.sleep(
+          retryDelay(response, attempt, {
+            retryBaseMs: this.retryBaseMs,
+            maxRetryDelayMs: this.maxRetryDelayMs,
+            retryJitterMs: this.retryJitterMs,
+            random: this.random,
+          })
+        );
         continue;
       }
       throw new ProviderHttpError(

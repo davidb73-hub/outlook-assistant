@@ -108,6 +108,15 @@ Provider requests use bounded retry/backoff and a five-minute per-request abort
 timeout. A timed-out item remains retryable; the safe page checkpoint does not
 advance until that page succeeds.
 
+After Gmail exhausts its bounded HTTP 429 retry budget, that account is reported
+as `rate_limited` and the scheduled cycle as `degraded`. The worker stops making
+requests to that mailbox for the current cycle, preserves its checkpoint,
+continues the other accounts, and exits successfully so launchd does not
+misreport provider throttling as a crashed worker. The rate limit remains
+visible in `scheduled.jsonl` and is retried on the next 15-minute cycle. Gmail
+authentication failures and other non-throttling errors remain `failed` and
+produce a failing service exit code.
+
 ## Authentication recovery
 
 Outlook uses the repository's existing delegated read token. If status reports
@@ -144,6 +153,14 @@ Its sanitized, size-bounded log is:
 
 ```text
 /Users/davidbasseal/Library/Application Support/Email Assistant Archive/logs/scheduled.jsonl
+```
+
+After installing or refreshing the current LaunchAgent, unexpected process
+stdout and stderr are retained separately instead of discarded:
+
+```text
+/Users/davidbasseal/Library/Logs/vitasci/email-assistant-archive.out.log
+/Users/davidbasseal/Library/Logs/vitasci/email-assistant-archive.err.log
 ```
 
 The Mac must be awake and online for an immediate run. Missed work is found on
