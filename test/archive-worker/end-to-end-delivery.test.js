@@ -16,7 +16,7 @@ const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 test('end-to-end: archive, triage, package, three destinations, acknowledgement', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'email-e2e-'));
   const raw = Buffer.from(
-    'From: sender@example.com\nSubject: VitaSci invoice project update\n\nOriginal email'
+    'From: sender@example.com\nSubject: VitaSci invoice — deadline for the signed contract\n\nOriginal email'
   );
   const rawPath = path.join(root, 'original.eml');
   await fs.writeFile(rawPath, raw);
@@ -33,7 +33,7 @@ test('end-to-end: archive, triage, package, three destinations, acknowledgement'
     .run();
   database.db
     .prepare(
-      `INSERT INTO messages(account_id, provider_message_id, subject, body_text, archive_state, first_archived_at, last_seen_at, updated_at, raw_blob_hash) VALUES ('vitasci-outlook', 'e2e-1', 'VitaSci invoice project update', '', 'archived_complete', datetime('now'), datetime('now'), datetime('now'), ?)`
+      `INSERT INTO messages(account_id, provider_message_id, subject, body_text, archive_state, first_archived_at, last_seen_at, updated_at, raw_blob_hash) VALUES ('vitasci-outlook', 'e2e-1', 'VitaSci invoice — deadline for the signed contract', '', 'archived_complete', datetime('now'), datetime('now'), datetime('now'), ?)`
     )
     .run(hash(raw));
   const messageId = database.db.prepare('SELECT id FROM messages').get().id;
@@ -42,7 +42,7 @@ test('end-to-end: archive, triage, package, three destinations, acknowledgement'
     accountId: 'vitasci-outlook',
     providerMessageId: 'e2e-1',
     rawBlobHash: hash(raw),
-    subject: 'VitaSci invoice project update',
+    subject: 'VitaSci invoice — deadline for the signed contract',
     bodyText: '',
     attachments: [],
   };
