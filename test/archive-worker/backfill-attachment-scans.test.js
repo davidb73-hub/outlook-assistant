@@ -14,7 +14,11 @@ const {
 function seed() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-'));
   const db = new ArchiveDatabase(path.join(dir, 'a.sqlite3'));
-  db.upsertAccount({ id: 'vitasci-outlook', provider: 'outlook', displayName: 'V' });
+  db.upsertAccount({
+    id: 'vitasci-outlook',
+    provider: 'outlook',
+    displayName: 'V',
+  });
   return { db, dir };
 }
 
@@ -23,7 +27,10 @@ function fakeStore(root) {
   return { blobPath: (_kind, hash) => path.join(root, `${hash}.blob`) };
 }
 
-function stageAttachment(db, { messageId, providerMessageId, attachId, fileName, blobHash }) {
+function stageAttachment(
+  db,
+  { providerMessageId, attachId, fileName, blobHash }
+) {
   const message = {
     providerMessageId,
     subject: 's',
@@ -108,7 +115,9 @@ describe('backfillAttachmentScans', () => {
     expect(scan).toHaveBeenCalledTimes(1);
     expect(summary.scanned + summary.cached).toBe(3);
     const rows = ctx.db.db
-      .prepare("SELECT COUNT(*) AS n FROM attachment_security WHERE status='safe'")
+      .prepare(
+        "SELECT COUNT(*) AS n FROM attachment_security WHERE status='safe'"
+      )
       .get();
     expect(rows.n).toBe(3);
   });
@@ -138,5 +147,52 @@ describe('backfillAttachmentScans', () => {
     // Blob-level cache must stay empty so a later run retries after the scanner is fixed.
     const cached = ctx.db.getBlobSecurity('c'.repeat(64));
     expect(cached).toBeNull();
+  });
+
+  test('applies filename policy per occurrence without poisoning the content cache', async () => {
+    ctx = seed();
+    const sharedHash = 'd'.repeat(64);
+    stageAttachment(ctx.db, {
+      providerMessageId: 'blocked-first',
+      attachId: 'att-blocked',
+      fileName: 'payload.exe',
+      blobHash: sharedHash,
+    });
+    stageAttachment(ctx.db, {
+      providerMessageId: 'safe-second',
+      attachId: 'att-safe',
+      fileName: 'logo.png',
+      blobHash: sharedHash,
+    });
+    const scan = jest.fn(() => ({ status: 'safe', scanner: 'clamav' }));
+
+    const summary = await backfillAttachmentScans({
+      database: ctx.db,
+      contentStore: fakeStore(ctx.dir),
+      scan,
+      clamscanPath: '/usr/bin/clamscan',
+    });
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(summary).toEqual(
+      expect.objectContaining({ scanned: 1, safe: 1, blocked: 1 })
+    );
+    const statuses = Object.fromEntries(
+      ctx.db.db
+        .prepare(
+          `SELECT a.file_name, s.status
+             FROM attachment_security s
+             JOIN attachments a ON a.id = s.attachment_id`
+        )
+        .all()
+        .map((row) => [row.file_name, row.status])
+    );
+    expect(statuses).toEqual({
+      'payload.exe': 'blocked',
+      'logo.png': 'safe',
+    });
+    expect(ctx.db.getBlobSecurity(sharedHash)).toEqual(
+      expect.objectContaining({ status: 'safe', scanner: 'clamav' })
+    );
   });
 });

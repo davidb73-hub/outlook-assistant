@@ -1,4 +1,8 @@
-const { scanAttachment } = require('./security-gate');
+const {
+  filenamePolicyVerdict,
+  isCacheableBlobVerdict,
+  scanAttachment,
+} = require('./security-gate');
 
 class ArchiveService {
   constructor({ database, contentStore, security = {} }) {
@@ -34,15 +38,38 @@ class ArchiveService {
       content,
       mediaType
     );
-    const scan = await scanAttachment({
-      filePath: this.contentStore.blobPath('attachment', blob.hash),
-      fileName: this.database.db
-        .prepare(
-          'SELECT file_name FROM attachments WHERE message_id = ? AND provider_attachment_id = ?'
-        )
-        .get(messageId, providerAttachmentId)?.file_name,
-      clamscanPath: this.security.clamScanPath,
-    });
+    const fileName = this.database.db
+      .prepare(
+        'SELECT file_name FROM attachments WHERE message_id = ? AND provider_attachment_id = ?'
+      )
+      .get(messageId, providerAttachmentId)?.file_name;
+    // Filename policy is occurrence-specific: the same bytes can be benign as
+    // logo.png and blocked as payload.exe. Only a content-derived malware verdict
+    // may be reused by hash.
+    const policyVerdict = filenamePolicyVerdict(fileName);
+    const cachedCandidate =
+      !policyVerdict && this.database.getBlobSecurity
+        ? this.database.getBlobSecurity(blob.hash)
+        : null;
+    const cached = isCacheableBlobVerdict(cachedCandidate)
+      ? cachedCandidate
+      : null;
+    const scan =
+      policyVerdict ||
+      cached ||
+      (await scanAttachment({
+        filePath: this.contentStore.blobPath('attachment', blob.hash),
+        fileName,
+        clamscanPath: this.security.clamScanPath,
+      }));
+    if (
+      !policyVerdict &&
+      !cached &&
+      this.database.recordBlobSecurity &&
+      isCacheableBlobVerdict(scan)
+    ) {
+      this.database.recordBlobSecurity(blob.hash, scan);
+    }
     this.database.recordAttachmentSecurity(
       messageId,
       providerAttachmentId,

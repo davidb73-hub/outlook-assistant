@@ -30,19 +30,31 @@ const BLOCKED_EXTENSIONS = new Set([
   '.wsh',
   '.xll',
 ]);
+const CACHEABLE_BLOB_STATUSES = new Set(['safe', 'quarantined']);
 
 function extensionRisk(fileName = '') {
   return BLOCKED_EXTENSIONS.has(path.extname(fileName).toLowerCase());
 }
 
+function filenamePolicyVerdict(fileName = '') {
+  if (!extensionRisk(fileName)) return null;
+  return {
+    status: 'blocked',
+    scanner: 'policy',
+    reason: 'active-content-file-type',
+  };
+}
+
+function isCacheableBlobVerdict(verdict) {
+  return (
+    CACHEABLE_BLOB_STATUSES.has(verdict?.status) &&
+    verdict?.scanner !== 'policy'
+  );
+}
+
 async function scanAttachment({ filePath, fileName, clamscanPath }) {
-  if (extensionRisk(fileName)) {
-    return {
-      status: 'blocked',
-      scanner: 'policy',
-      reason: 'active-content-file-type',
-    };
-  }
+  const policyVerdict = filenamePolicyVerdict(fileName);
+  if (policyVerdict) return policyVerdict;
   if (!clamscanPath) {
     return {
       status: 'scanner_unavailable',
@@ -94,7 +106,10 @@ function isTriageEligible(status) {
 
 module.exports = {
   BLOCKED_EXTENSIONS,
+  CACHEABLE_BLOB_STATUSES,
   extensionRisk,
+  filenamePolicyVerdict,
+  isCacheableBlobVerdict,
   scanAttachment,
   isTriageEligible,
 };

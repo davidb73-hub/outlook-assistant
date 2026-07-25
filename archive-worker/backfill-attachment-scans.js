@@ -1,9 +1,8 @@
-const { scanAttachment } = require('./security-gate');
-
-// A verdict is cacheable only if rescanning could not change it — same rule the live
-// pipeline uses in archive-service.js. 'scanner_unavailable' and 'pending' describe the
-// scanner, not the bytes, so they must never be frozen into the blob-level cache.
-const TERMINAL_VERDICTS = new Set(['safe', 'quarantined', 'blocked']);
+const {
+  filenamePolicyVerdict,
+  isCacheableBlobVerdict,
+  scanAttachment,
+} = require('./security-gate');
 
 /**
  * Scan attachments that were archived without a security verdict (the bulk-hydrate gap)
@@ -56,20 +55,26 @@ async function backfillAttachmentScans({
         continue;
       }
 
-      // Reuse a prior verdict for identical content — this is what turns 20k rows into a
-      // few thousand real scans.
-      const cached = database.getBlobSecurity(attachment.blob_hash);
-      let verdict = cached;
-      if (verdict) {
+      // Filename policy belongs to this attachment occurrence. Only the expensive,
+      // content-derived malware verdict is reusable by hash.
+      const policyVerdict = filenamePolicyVerdict(attachment.file_name);
+      const cachedCandidate = policyVerdict
+        ? null
+        : database.getBlobSecurity(attachment.blob_hash);
+      const cached = isCacheableBlobVerdict(cachedCandidate)
+        ? cachedCandidate
+        : null;
+      let verdict = policyVerdict || cached;
+      if (cached) {
         summary.cached += 1;
-      } else {
+      } else if (!policyVerdict) {
         verdict = await scan({
           filePath: contentStore.blobPath('attachment', attachment.blob_hash),
           fileName: attachment.file_name,
           clamscanPath,
         });
         summary.scanned += 1;
-        if (TERMINAL_VERDICTS.has(verdict.status)) {
+        if (isCacheableBlobVerdict(verdict)) {
           database.recordBlobSecurity(attachment.blob_hash, verdict);
         }
       }
@@ -87,4 +92,4 @@ async function backfillAttachmentScans({
   return summary;
 }
 
-module.exports = { backfillAttachmentScans, TERMINAL_VERDICTS };
+module.exports = { backfillAttachmentScans };

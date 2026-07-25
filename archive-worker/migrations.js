@@ -271,6 +271,52 @@ const MIGRATIONS = [
     name: 'delivery-package-paths',
     sql: `ALTER TABLE delivery_jobs ADD COLUMN package_root TEXT;`,
   },
+  {
+    version: 6,
+    name: 'attachment-security-by-content-hash',
+    // Verdicts were keyed to attachment_id, so identical content was rescanned for
+    // every message it appeared in — one signature image occurred 369 times. Keying
+    // the verdict to the content hash means each distinct file is scanned once, ever.
+    // Measured on the live archive at migration time: 20,358 attachment rows resolve
+    // to 7,494 distinct blobs (inline images: 10,563 rows, 2,187 blobs).
+    sql: `
+      CREATE TABLE attachment_security_blob (
+        blob_hash TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'safe', 'quarantined', 'blocked', 'scanner_unavailable')),
+        scanner TEXT NOT NULL,
+        scanner_version TEXT,
+        reason TEXT,
+        scanned_at TEXT NOT NULL
+      );
+      CREATE INDEX attachment_security_blob_status_idx
+        ON attachment_security_blob(status);
+    `,
+  },
+  {
+    version: 7,
+    name: 'taint-provenance-columns',
+    // Taint provenance (command-centre/docs/design-1-taint-provenance.md), step 2.
+    //
+    // taint_tier is a stored FLOOR, not a verdict: every consumer takes
+    // max(stored_tier, classify_now), so NULL is safe — it simply falls back to fresh
+    // classification, i.e. today's behaviour. The classifier lives in Python
+    // (command-centre/tiering.py); porting its patterns to JS would create a second,
+    // divergent copy — the exact "signal that looks like coverage" the audit flagged.
+    // So these columns are written by a Python stamping pass, not by JS ingest, which
+    // leaves them NULL. Origin is deliberately NOT stored: `direction` already encodes
+    // it (inbound → external, outbound → operator).
+    //
+    // taint_account carries the CRM account attributed from the structured sender/
+    // recipient domain at stamp time — the signal is strongest here and lost later,
+    // and it repairs the weak substring account-floor matching in tiering.py.
+    sql: `
+      ALTER TABLE messages ADD COLUMN taint_tier TEXT
+        CHECK (taint_tier IN ('GREEN','AMBER','RED') OR taint_tier IS NULL);
+      ALTER TABLE messages ADD COLUMN taint_rule_version INTEGER;
+      ALTER TABLE messages ADD COLUMN taint_account TEXT;
+      CREATE INDEX messages_taint_tier_idx ON messages(taint_tier);
+    `,
+  },
 ];
 
 module.exports = {
