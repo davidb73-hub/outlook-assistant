@@ -47,13 +47,14 @@ function scheduledStatus(results, reconciliations, backup) {
       (result) => !['completed', 'rate_limited'].includes(result.status)
     ) ||
     reconciliations.some(
-      (result) => !['completed', 'rate_limited'].includes(result.status)
+      (result) =>
+        !['completed', 'rate_limited', 'deferred'].includes(result.status)
     )
   ) {
     return 'failed';
   }
-  return [...results, ...reconciliations].some(
-    (result) => result.status === 'rate_limited'
+  return [...results, ...reconciliations].some((result) =>
+    ['rate_limited', 'deferred'].includes(result.status)
   )
     ? 'degraded'
     : 'completed';
@@ -145,6 +146,8 @@ async function runScheduled(env = process.env) {
       });
     }
     const reconciliations = [];
+    const reconciliationDeadlineMs =
+      Date.now() + config.reconciliationBudgetSeconds * 1000;
     for (const account of archive.config.accounts) {
       const syncResult = results.find(
         (result) => result.accountId === account.id
@@ -153,7 +156,12 @@ async function runScheduled(env = process.env) {
         syncResult?.status === 'completed' &&
         archive.engine.reconciliationDue(account)
       ) {
-        reconciliations.push(await archive.engine.reconcileAccount(account));
+        reconciliations.push(
+          await archive.engine.reconcileAccount(account, {
+            deadlineMs: reconciliationDeadlineMs,
+            batchSize: config.reconciliationBatchSize,
+          })
+        );
       }
     }
     const allHealthy =
@@ -213,6 +221,7 @@ async function runScheduled(env = process.env) {
         localEligible: result.localEligible,
         differences: result.differences,
         errors: result.errors,
+        deferredAt: result.deferredAt,
       })),
       accounts: results.map((result) => ({
         accountId: result.accountId,

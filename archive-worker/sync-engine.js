@@ -63,7 +63,13 @@ class ArchiveSyncEngine {
     });
   }
 
-  async archiveRefs(account, provider, refs, runId) {
+  async archiveRefs(
+    account,
+    provider,
+    refs,
+    runId,
+    { shouldContinue = () => true } = {}
+  ) {
     const counts = { discovered: refs.length, archived: 0, errors: 0 };
     const unique = new Map(refs.map((ref) => [ref.id, ref]));
     const staged = [];
@@ -123,7 +129,8 @@ class ArchiveSyncEngine {
       staged,
       (messageId, attachment) =>
         provider.fetchAttachment(messageId, attachment),
-      recordArchiveError
+      recordArchiveError,
+      { shouldContinue }
     );
     counts.archived += completed.length;
     for (const archived of completed) {
@@ -342,15 +349,46 @@ class ArchiveSyncEngine {
     );
   }
 
-  async reconcileAccount(account) {
+  async reconcileAccount(
+    account,
+    {
+      deadlineMs = Number.POSITIVE_INFINITY,
+      batchSize = this.config.reconciliationBatchSize || 1,
+      now = () => Date.now(),
+    } = {}
+  ) {
     const provider = this.providerFactory(account);
     const runId = this.database.beginRun(account.id, 'reconciliation');
     const providerIds = new Set();
     const counts = { discovered: 0, archived: 0, errors: 0 };
+    const safeBatchSize = Math.max(1, Number.parseInt(batchSize, 10) || 1);
+    const budgetExpired = () =>
+      Number.isFinite(deadlineMs) && now() >= deadlineMs;
+    const defer = (deferredAt) => {
+      const localEligible = this.database.listProviderMessageIds(account.id, {
+        currentEligible: 1,
+      }).length;
+      const details = {
+        providerEligible: providerIds.size,
+        localEligible,
+        differences: null,
+        outcome: 'deferred',
+        deferredAt,
+      };
+      this.database.finishRun(runId, 'interrupted', counts, details);
+      return {
+        accountId: account.id,
+        status: 'deferred',
+        ...counts,
+        ...details,
+      };
+    };
     try {
+      if (budgetExpired()) return defer('before_locations');
       await this.recordLocations(account, provider);
       let cursor = null;
       do {
+        if (budgetExpired()) return defer('before_inventory_page');
         const page = await provider.listInventoryPage(cursor, {
           pageSize: 500,
         });
@@ -362,14 +400,19 @@ class ArchiveSyncEngine {
           })
         );
         const missing = page.refs.filter((ref) => !local.has(ref.id));
-        const archived = await this.archiveRefs(
-          account,
-          provider,
-          missing,
-          runId
-        );
-        counts.archived += archived.archived;
-        counts.errors += archived.errors;
+        for (let offset = 0; offset < missing.length; offset += safeBatchSize) {
+          if (budgetExpired()) return defer('before_missing_batch');
+          const archived = await this.archiveRefs(
+            account,
+            provider,
+            missing.slice(offset, offset + safeBatchSize),
+            runId,
+            { shouldContinue: () => !budgetExpired() }
+          );
+          counts.archived += archived.archived;
+          counts.errors += archived.errors;
+          if (budgetExpired()) return defer('after_missing_batch');
+        }
         cursor = page.nextCursor;
         if (page.complete) break;
       } while (cursor);

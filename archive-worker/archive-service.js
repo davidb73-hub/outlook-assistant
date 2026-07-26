@@ -103,9 +103,19 @@ class ArchiveService {
     return staged;
   }
 
-  async completeStagedAttachments(staged, fetchAttachment, onError = null) {
+  async completeStagedAttachments(
+    staged,
+    fetchAttachment,
+    onError = null,
+    { shouldContinue = () => true } = {}
+  ) {
     for (const { archived, providerMessageId, attachments } of staged) {
       for (const attachment of attachments) {
+        if (!shouldContinue()) {
+          return staged.map(({ archived: item }) =>
+            this.database.getMessageById(item.id)
+          );
+        }
         const current = archived.attachments.find(
           (item) =>
             item.provider_attachment_id === attachment.providerAttachmentId

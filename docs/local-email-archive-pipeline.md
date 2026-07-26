@@ -176,6 +176,15 @@ Messages are staged durably before slow attachment downloads, so a large
 attachment cannot prevent unrelated messages in the same provider page from
 being preserved.
 
+Full-mailbox reconciliation is maintenance, not new-mail ingestion. The
+scheduled worker runs every account's incremental poll first, then gives
+reconciliation a shared five-minute budget. It yields between missing messages
+and between attachments, records a deferred run as degraded rather than failed,
+and releases the single-worker lock for the next poll. The budget and one-message
+batch are configurable with
+`EMAIL_ARCHIVE_RECONCILIATION_BUDGET_SECONDS` and
+`EMAIL_ARCHIVE_RECONCILIATION_BATCH_SIZE`.
+
 ## Security and backup
 
 - Use macOS FileVault and owner-only permissions for live local data.

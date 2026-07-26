@@ -58,6 +58,18 @@ function buildArchiveConfig(env = process.env) {
       env.EMAIL_ARCHIVE_ATTACHMENT_RETRY_BATCH_SIZE,
       25
     ),
+    // Full-mailbox reconciliation is maintenance work. It must yield so the
+    // next 15-minute new-mail poll can acquire the single worker lock.
+    reconciliationBudgetSeconds: parsePositiveInteger(
+      env.EMAIL_ARCHIVE_RECONCILIATION_BUDGET_SECONDS,
+      300
+    ),
+    // Complete one missing message at a time so a page containing hundreds of
+    // attachment-heavy messages cannot become one uninterruptible unit.
+    reconciliationBatchSize: parsePositiveInteger(
+      env.EMAIL_ARCHIVE_RECONCILIATION_BATCH_SIZE,
+      1
+    ),
     clamScanPath:
       env.EMAIL_ARCHIVE_CLAMSCAN_PATH || '/opt/homebrew/bin/clamscan',
     deliveryDestinations: {

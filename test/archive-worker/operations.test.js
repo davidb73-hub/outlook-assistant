@@ -99,6 +99,13 @@ describe('unattended archive operations', () => {
     ).toBe('degraded');
     expect(
       scheduledStatus(
+        accounts.map((result) => ({ ...result, status: 'completed' })),
+        [{ accountId: 'gmail-ablative', status: 'deferred' }],
+        { status: 'not_due' }
+      )
+    ).toBe('degraded');
+    expect(
+      scheduledStatus(
         accounts.map((result) =>
           result.accountId === 'gmail-ablative'
             ? { ...result, status: 'failed', error: { code: 'GMAIL_AUTH' } }

@@ -43,4 +43,17 @@ describe('archive account identity mapping', () => {
       `${path.sep}CloudStorage${path.sep}`
     );
   });
+
+  test('bounds full reconciliation so new-mail polling can regain the worker lock', () => {
+    const defaults = buildArchiveConfig({});
+    expect(defaults.reconciliationBudgetSeconds).toBe(300);
+    expect(defaults.reconciliationBatchSize).toBe(1);
+
+    const configured = buildArchiveConfig({
+      EMAIL_ARCHIVE_RECONCILIATION_BUDGET_SECONDS: '90',
+      EMAIL_ARCHIVE_RECONCILIATION_BATCH_SIZE: '3',
+    });
+    expect(configured.reconciliationBudgetSeconds).toBe(90);
+    expect(configured.reconciliationBatchSize).toBe(3);
+  });
 });

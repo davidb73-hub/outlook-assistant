@@ -416,6 +416,101 @@ describe('archive sync engine', () => {
     expect(database.unresolvedErrors()).toEqual([]);
   });
 
+  test('time-boxes reconciliation between missing messages without losing progress', async () => {
+    const provider = providerFixture([], {
+      listInventoryPage: jest.fn(async () => ({
+        refs: [{ id: 'first-missing' }, { id: 'second-missing' }],
+        nextCursor: null,
+        complete: true,
+      })),
+    });
+    let clock = 0;
+    provider.fetchBundle.mockImplementation(async (ref) => {
+      clock += 60;
+      return {
+        message: message(ref.id),
+        rawContent: Buffer.from(`Raw ${ref.id}`),
+      };
+    });
+
+    const result = await engineFor(provider).reconcileAccount(account, {
+      deadlineMs: 50,
+      batchSize: 1,
+      now: () => clock,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: 'deferred',
+        archived: 1,
+        deferredAt: 'after_missing_batch',
+        differences: null,
+      })
+    );
+    expect(database.getMessage(account.id, 'first-missing')).toBeTruthy();
+    expect(database.getMessage(account.id, 'second-missing')).toBeNull();
+    expect(database.getCursor(account.id, 'reconciliation')).toBeNull();
+    expect(
+      database.db
+        .prepare(
+          "SELECT status, details_json FROM ingestion_runs WHERE run_type = 'reconciliation' ORDER BY id DESC LIMIT 1"
+        )
+        .get()
+    ).toEqual(
+      expect.objectContaining({
+        status: 'interrupted',
+        details_json: expect.stringContaining('"outcome":"deferred"'),
+      })
+    );
+  });
+
+  test('time-boxed reconciliation also yields between attachments', async () => {
+    const attachments = [
+      {
+        providerAttachmentId: 'first-attachment',
+        fileName: 'first.txt',
+        mediaType: 'text/plain',
+      },
+      {
+        providerAttachmentId: 'second-attachment',
+        fileName: 'second.txt',
+        mediaType: 'text/plain',
+      },
+    ];
+    let clock = 0;
+    const provider = providerFixture([], {
+      listInventoryPage: jest.fn(async () => ({
+        refs: [{ id: 'attachment-message' }],
+        nextCursor: null,
+        complete: true,
+      })),
+      fetchBundle: jest.fn(async () => ({
+        message: message(
+          'attachment-message',
+          'attachment-message',
+          attachments
+        ),
+        rawContent: Buffer.from('Raw attachment-message'),
+      })),
+      fetchAttachment: jest.fn(async () => {
+        clock += 60;
+        return Buffer.from('attachment bytes');
+      }),
+    });
+
+    const result = await engineFor(provider).reconcileAccount(account, {
+      deadlineMs: 50,
+      batchSize: 1,
+      now: () => clock,
+    });
+
+    expect(result.status).toBe('deferred');
+    expect(provider.fetchAttachment).toHaveBeenCalledTimes(1);
+    expect(
+      database.getMessage(account.id, 'attachment-message').archive_state
+    ).toBe('archived_pending_attachments');
+  });
+
   test('a clean full reconciliation safely completes a partial backfill', async () => {
     const provider = providerFixture([], {
       listInventoryPage: jest.fn(async () => ({
