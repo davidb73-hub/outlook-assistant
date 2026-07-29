@@ -20,9 +20,11 @@ beforeEach(() => {
   jest.resetAllMocks();
   jest.spyOn(console, 'error').mockImplementation();
   ensureAuthenticated.mockResolvedValue(mockAccessToken);
+  delete process.env.OUTLOOK_ALLOWED_RECIPIENTS;
 });
 
 afterEach(() => {
+  delete process.env.OUTLOOK_ALLOWED_RECIPIENTS;
   console.error.mockRestore();
 });
 
@@ -127,6 +129,31 @@ describe('action=create', () => {
     expect(callGraphAPI).not.toHaveBeenCalled();
   });
 
+  it('should save recipients that are outside the send allowlist', async () => {
+    process.env.OUTLOOK_ALLOWED_RECIPIENTS = 'owner@example.com';
+    callGraphAPI.mockResolvedValue({
+      ...mockDraftResponse,
+      toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+    });
+
+    const result = await handleDraft({
+      action: 'create',
+      to: 'external@example.net',
+      subject: 'External recipient draft',
+      body: 'Review before sending',
+    });
+
+    expect(result.content[0].text).toContain('Draft created');
+    expect(callGraphAPI).toHaveBeenCalledWith(
+      mockAccessToken,
+      'POST',
+      'me/messages',
+      expect.objectContaining({
+        toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+      })
+    );
+  });
+
   it('should handle auth error', async () => {
     ensureAuthenticated.mockRejectedValue(new Error('Authentication required'));
 
@@ -181,6 +208,30 @@ describe('action=update', () => {
     const result = await handleDraft({ action: 'update', subject: 'Test' });
     expect(result.content[0].text).toContain('Draft ID (id) is required');
   });
+
+  it('should update recipients without applying the send allowlist', async () => {
+    process.env.OUTLOOK_ALLOWED_RECIPIENTS = 'owner@example.com';
+    callGraphAPI.mockResolvedValue({
+      ...mockDraftResponse,
+      toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+    });
+
+    const result = await handleDraft({
+      action: 'update',
+      id: 'draft-123',
+      to: 'external@example.net',
+    });
+
+    expect(result.content[0].text).toContain('Draft updated');
+    expect(callGraphAPI).toHaveBeenCalledWith(
+      mockAccessToken,
+      'PATCH',
+      'me/messages/draft-123',
+      {
+        toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+      }
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────
@@ -188,7 +239,13 @@ describe('action=update', () => {
 // ──────────────────────────────────────────────────
 describe('action=send', () => {
   it('should send a draft', async () => {
-    callGraphAPI.mockResolvedValue(undefined); // 202 no body
+    callGraphAPI
+      .mockResolvedValueOnce({
+        toRecipients: [{ emailAddress: { address: 'user@example.com' } }],
+        ccRecipients: [],
+        bccRecipients: [],
+      })
+      .mockResolvedValueOnce(undefined); // 202 no body
 
     const result = await handleDraft({
       action: 'send',
@@ -197,6 +254,16 @@ describe('action=send', () => {
 
     expect(result.content[0].text).toContain('Draft sent successfully');
     expect(result.content[0].text).toContain('no longer valid');
+    expect(callGraphAPI).toHaveBeenNthCalledWith(
+      1,
+      mockAccessToken,
+      'GET',
+      'me/messages/draft-123',
+      null,
+      {
+        $select: 'toRecipients,ccRecipients,bccRecipients',
+      }
+    );
     expect(callGraphAPI).toHaveBeenCalledWith(
       mockAccessToken,
       'POST',
@@ -207,6 +274,54 @@ describe('action=send', () => {
   it('should require id for send', async () => {
     const result = await handleDraft({ action: 'send' });
     expect(result.content[0].text).toContain('Draft ID (id) is required');
+  });
+
+  it('should block sending when any current draft recipient is not allowed', async () => {
+    process.env.OUTLOOK_ALLOWED_RECIPIENTS = 'owner@example.com';
+    callGraphAPI.mockResolvedValue({
+      toRecipients: [{ emailAddress: { address: 'owner@example.com' } }],
+      ccRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+      bccRecipients: [],
+    });
+
+    const result = await handleDraft({
+      action: 'send',
+      id: 'draft-123',
+    });
+
+    expect(result.content[0].text).toContain(
+      'Recipient not allowed: external@example.net'
+    );
+    expect(callGraphAPI).toHaveBeenCalledTimes(1);
+    expect(callGraphAPI).not.toHaveBeenCalledWith(
+      mockAccessToken,
+      'POST',
+      'me/messages/draft-123/send'
+    );
+  });
+
+  it('should allow sending when all current draft recipients are allowed', async () => {
+    process.env.OUTLOOK_ALLOWED_RECIPIENTS = 'example.com,trusted@example.net';
+    callGraphAPI
+      .mockResolvedValueOnce({
+        toRecipients: [{ emailAddress: { address: 'owner@example.com' } }],
+        ccRecipients: [{ emailAddress: { address: 'trusted@example.net' } }],
+        bccRecipients: [],
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const result = await handleDraft({
+      action: 'send',
+      id: 'draft-123',
+    });
+
+    expect(result.content[0].text).toContain('Draft sent successfully');
+    expect(callGraphAPI).toHaveBeenNthCalledWith(
+      2,
+      mockAccessToken,
+      'POST',
+      'me/messages/draft-123/send'
+    );
   });
 });
 
@@ -336,6 +451,32 @@ describe('action=forward', () => {
       {
         toRecipients: [{ emailAddress: { address: 'forward@example.com' } }],
         comment: 'FYI',
+      }
+    );
+  });
+
+  it('should create a forward draft outside the send allowlist', async () => {
+    process.env.OUTLOOK_ALLOWED_RECIPIENTS = 'owner@example.com';
+    callGraphAPI.mockResolvedValue({
+      ...mockDraftResponse,
+      toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+    });
+
+    const result = await handleDraft({
+      action: 'forward',
+      id: 'msg-456',
+      to: 'external@example.net',
+      comment: 'For review',
+    });
+
+    expect(result.content[0].text).toContain('forward draft created');
+    expect(callGraphAPI).toHaveBeenCalledWith(
+      mockAccessToken,
+      'POST',
+      'me/messages/msg-456/createForward',
+      {
+        toRecipients: [{ emailAddress: { address: 'external@example.net' } }],
+        comment: 'For review',
       }
     );
   });

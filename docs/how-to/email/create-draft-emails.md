@@ -142,13 +142,14 @@ params:
 
 ## Safety Controls
 
-The `draft` tool inherits the same safety controls as `send-email`:
+Drafts stay inside your mailbox until they are sent. Recipient restrictions
+therefore apply at delivery time rather than composition time:
 
 | Control | Applies to | Config |
 |---------|-----------|--------|
 | Dry-run preview | `create` | `dryRun: true` |
 | Mail-tips check | `create` | `checkRecipients: true` |
-| Recipient allowlist | `create`, `update`, `forward` | `OUTLOOK_ALLOWED_RECIPIENTS` env |
+| Recipient allowlist | `send` (checks the draft's current To/CC/BCC recipients) | `OUTLOOK_ALLOWED_RECIPIENTS` env |
 | Rate limiting | `create`, `update` | `OUTLOOK_MAX_DRAFT_PER_SESSION` env |
 | Send rate limiting | `send` | `OUTLOOK_MAX_EMAILS_PER_SESSION` env (shared with `send-email`) |
 
@@ -156,6 +157,7 @@ The `draft` tool inherits the same safety controls as `send-email`:
 
 - Use drafts for important emails that need review — safer than `send-email` with `dryRun`
 - The draft-then-send workflow gives you a real draft in Outlook that you can also edit in the Outlook app
+- You can save or edit a draft for any recipient; sending remains blocked until every current recipient is allowed
 - Reply/forward drafts preserve threading — the sent message appears in the correct conversation
 - No new Azure permissions needed — drafts use the same `Mail.ReadWrite` and `Mail.Send` scopes
 

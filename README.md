@@ -153,7 +153,13 @@ Outlook Assistant is designed with safety-first principles for AI-driven email a
 
 > **App-only deployments**: if you use `OUTLOOK_AUTH_METHOD=client-credentials`, treat these send guards as mandatory and also scope the app to the target mailbox in Exchange. Application permissions can otherwise apply tenant-wide.
 
-**Draft protections** — The `draft` tool shares `send-email` safety controls: dry-run preview, recipient allowlist, mail-tips validation, and rate limiting. The `send` action shares the `send-email` rate limit counter, preventing circumvention via the draft-then-send pathway.
+**Draft protections** — Saving or editing a draft does not apply the recipient
+allowlist because no email leaves the mailbox. The `send` action fetches the
+draft's current To/CC/BCC recipients and applies `OUTLOOK_ALLOWED_RECIPIENTS`
+immediately before delivery. It also shares the `send-email` rate limit counter,
+preventing circumvention through a draft-then-send workflow. Draft creation
+continues to support dry-run previews, mail-tips validation, and its own rate
+limit.
 
 **Token-optimised architecture** — Tools are consolidated using the STRAP (Single Tool, Resource, Action Pattern) approach. 24 tools instead of 55 reduces per-turn overhead by ~11,000 tokens (~64%), keeping more of the AI's context window available for your actual conversation. Fewer tools also means the AI selects the right tool more accurately — research shows tool selection degrades beyond ~40 tools.
 
@@ -362,7 +368,7 @@ USE_TEST_MODE=false
 | `OUTLOOK_DEVICE_CODE_STATE_PATH` | Advanced override for the temporary device-code state file. Usually prefer `OUTLOOK_ACCOUNT_ID`. | derived from the token file |
 | `OUTLOOK_DEFAULT_TIMEZONE` | IANA timezone applied to calendar events when callers don't pass one (e.g. `Europe/London`, `America/New_York`). | `Australia/Melbourne` |
 | `OUTLOOK_MAX_EMAILS_PER_SESSION` | Cap on `send-email` + `draft send` per MCP server lifetime. | unlimited |
-| `OUTLOOK_ALLOWED_RECIPIENTS` | Comma-separated allowlist of domains/addresses for sends, drafts, and rule forwards. | unrestricted |
+| `OUTLOOK_ALLOWED_RECIPIENTS` | Comma-separated allowlist of domains/addresses for direct sends, draft sends, and rule forwards. Draft creation/editing remains unrestricted. | unrestricted |
 
 ### MCP Client Configuration
 

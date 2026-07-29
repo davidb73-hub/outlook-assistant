@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Drafts can now be created, updated, replied to, or forwarded with recipients
+  outside `OUTLOOK_ALLOWED_RECIPIENTS`. The allowlist is enforced against the
+  saved draft's current To/CC/BCC recipients immediately before `draft send`,
+  keeping composition unblocked without weakening delivery controls.
+
 ## [3.9.1] - 2026-07-08
 
 ### Fixed

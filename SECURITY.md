@@ -113,7 +113,10 @@ These controls are not a substitute for careful oversight:
 
 - Annotations depend on the AI client respecting them — not all clients support MCP annotations
 - Rate limits reset when the MCP server restarts
-- The recipient allowlist only applies to the `send-email` tool — it does not prevent forwarding or replying via other means
+- The recipient allowlist applies to `send-email`, `draft send`, and server-side
+  rule forwarding/redirecting. Drafts may be created, edited, replied to, or
+  forwarded to any recipient because those actions do not deliver email; the
+  saved To/CC/BCC recipients are checked immediately before `draft send`.
 - AI models can still make mistakes in composing email content, selecting recipients, or interpreting instructions
 - No automated system can fully prevent prompt injection attacks or adversarial manipulation
 

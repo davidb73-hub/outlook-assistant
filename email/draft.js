@@ -147,16 +147,13 @@ async function handleCreateDraft(args) {
   const { dryRun = false, checkRecipients: doCheckRecipients = false } = args;
   const message = buildMessageObject(args);
 
-  // Check recipient allowlist if recipients specified
+  // Drafts are private mailbox state, so recipient allowlists are enforced only
+  // when the draft is sent. Recipients are still collected here for mail tips.
   const allRecipients = [
     ...(message.toRecipients || []),
     ...(message.ccRecipients || []),
     ...(message.bccRecipients || []),
   ];
-  if (allRecipients.length > 0) {
-    const allowlistError = checkRecipientAllowlist(allRecipients);
-    if (allowlistError) return allowlistError;
-  }
 
   // Pre-save recipient validation via mail-tips
   if (doCheckRecipients && allRecipients.length > 0) {
@@ -231,17 +228,6 @@ async function handleUpdateDraft(args) {
 
   const message = buildMessageObject(args);
 
-  // Check recipient allowlist if recipients changed
-  const allRecipients = [
-    ...(message.toRecipients || []),
-    ...(message.ccRecipients || []),
-    ...(message.bccRecipients || []),
-  ];
-  if (allRecipients.length > 0) {
-    const allowlistError = checkRecipientAllowlist(allRecipients);
-    if (allowlistError) return allowlistError;
-  }
-
   // Rate limit check
   const rateLimitError = checkRateLimit('draft');
   if (rateLimitError) return rateLimitError;
@@ -272,12 +258,33 @@ async function handleSendDraft(args) {
     };
   }
 
-  // Rate limit via send-email counter (shares limit with direct sends)
-  const rateLimitError = checkRateLimit('send-email');
-  if (rateLimitError) return rateLimitError;
-
   try {
     const accessToken = await ensureAuthenticated();
+
+    // A draft may contain recipients that were not allowlisted when it was
+    // created or edited. Read its current recipient set and enforce delivery
+    // policy immediately before the irreversible send action.
+    const draft = await callGraphAPI(
+      accessToken,
+      'GET',
+      `me/messages/${id}`,
+      null,
+      {
+        $select: 'toRecipients,ccRecipients,bccRecipients',
+      }
+    );
+    const allRecipients = [
+      ...(draft.toRecipients || []),
+      ...(draft.ccRecipients || []),
+      ...(draft.bccRecipients || []),
+    ];
+    const allowlistError = checkRecipientAllowlist(allRecipients);
+    if (allowlistError) return allowlistError;
+
+    // Rate limit via send-email counter (shares limit with direct sends)
+    const rateLimitError = checkRateLimit('send-email');
+    if (rateLimitError) return rateLimitError;
+
     await callGraphAPI(accessToken, 'POST', `me/messages/${id}/send`);
     return {
       content: [
@@ -420,10 +427,6 @@ async function handleForwardDraft(args) {
   }
 
   const toRecipients = formatRecipients(to);
-
-  // Check recipient allowlist
-  const allowlistError = checkRecipientAllowlist(toRecipients);
-  if (allowlistError) return allowlistError;
 
   const requestBody = {
     toRecipients,

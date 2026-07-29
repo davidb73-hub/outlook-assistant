@@ -63,7 +63,12 @@ Quick reference for all 24 MCP tools across 10 modules, plus 4 built-in MCP prom
 | `reply-all` | Create reply-all draft from message | `id` |
 | `forward` | Create forward draft with new recipients | `id`, `to` |
 
-> **Draft safety**: `dryRun: true` previews without saving (create only). `checkRecipients: true` validates recipients via mail-tips before saving. The `send` action shares rate limits with `send-email`. Recipient allowlist applies to create, update, and forward. `comment` and `body` are mutually exclusive on reply/forward.
+> **Draft safety**: `dryRun: true` previews without saving (create only).
+> `checkRecipients: true` validates recipients via mail-tips before saving.
+> Creating and editing drafts does not apply the recipient allowlist. The
+> `send` action validates the saved draft's current To/CC/BCC recipients and
+> shares rate limits with `send-email`. `comment` and `body` are mutually
+> exclusive on reply/forward.
 
 ### Export formats
 
