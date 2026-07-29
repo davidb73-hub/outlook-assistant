@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davidbasseal.email-assistant-archive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/node@22/bin/node</string>
+        <string>/Users/davidbasseal/Developer/EMAIL-Assistant-Repos/outlook-assistant/archive-worker/scheduled.js</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/davidbasseal/Developer/EMAIL-Assistant-Repos/outlook-assistant</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/davidbasseal/Library/Logs/vitasci/email-assistant-archive.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/davidbasseal/Library/Logs/vitasci/email-assistant-archive.err.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>
