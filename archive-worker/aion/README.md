@@ -132,9 +132,23 @@ Verified in namespace `Practice` on 5 August 2026:
 - Activities: 11 completed, zero failed
 - Result: three synchronized, zero discrepancies, `synthetic-snapshot-9`
 
-The identity-preflight package was deployed and its dedicated worker became
-dispatch-eligible. Its activity was deliberately not run during integration,
-so no credential file or provider was accessed.
+### Verified live identity-preflight evidence
+
+Verified in namespace `Practice` on 6 August 2026:
+
+- Workflow ID: `cd33aae4-0f73-492e-a1a6-bbbbabaad102`
+- Run ID: `d5e07c58-6124-4020-8148-ecd446565fc8`
+- Status: `Completed`
+- Durable events: 6
+- Activity: one identity audit completed on its first attempt
+- Result: `ready`; all three configured profile identities matched
+- Safety evidence: protected before/after fingerprints proved `.env`, all
+  credential files, the archive database, and its sidecars were unchanged
+- Shutdown evidence: the dedicated worker was stopped and availability returned
+  to zero connected workers
+
+This proves only live provider-profile identity reads. It does not authorize
+mail retrieval, archive access, Gmail repair, scheduling, or backup operations.
 
 ## Prepare credentials for the live identity preflight
 
