@@ -15,6 +15,10 @@ path = "src/bin/synthetic.rs"
 name = "email-archive-identity-preflight-worker"
 path = "src/bin/identity_preflight.rs"
 
+[[bin]]
+name = "email-archive-clone-commissioning-worker"
+path = "src/bin/clone_commissioning.rs"
+
 [workspace]
 
 [lints.rust]

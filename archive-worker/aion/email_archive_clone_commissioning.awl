@@ -1,0 +1,122 @@
+//! Commission the real archive machinery against disposable synthetic evidence only.
+//! This workflow cannot retrieve live email, mutate the live archive, modify mailboxes,
+//! enable scheduling, use production backup credentials, or push source code.
+workflow email_archive_clone_commissioning
+  input session_id: String
+  input confirmation: String
+  outcome commissioned: type CommissioningSummary, route success
+  outcome blocked:      type CommissioningSummary, route failure
+
+type StageReceipt {
+  ok: Bool,
+  session_id: String,
+  code: String,
+  fixture_messages: Int,
+  fixture_blobs: Int,
+}
+
+type RepairReceipt {
+  ok: Bool,
+  session_id: String,
+  code: String,
+  changed_rows: Int,
+  quarantined_duplicates: Int,
+  moved_canonicals: Int,
+  second_run_noop: Bool,
+}
+
+type ReconciliationReceipt {
+  ok: Bool,
+  session_id: String,
+  code: String,
+  accounts_reconciled: Int,
+  inventory_items: Int,
+  differences: Int,
+  integrity_ok: Bool,
+}
+
+type BackupReceipt {
+  ok: Bool,
+  session_id: String,
+  code: String,
+  snapshots_created: Int,
+  deduplication_observed: Bool,
+  manifest_blobs: Int,
+}
+
+type RestoreReceipt {
+  ok: Bool,
+  session_id: String,
+  code: String,
+  database_hash_matches: Bool,
+  counts_match: Bool,
+  verified_blobs: Int,
+}
+
+type CommissioningSummary {
+  status: String,
+  session_id: String,
+  repair_rehearsed: Bool,
+  accounts_reconciled: Int,
+  differences: Int,
+  backup_verified: Bool,
+  restore_verified: Bool,
+  live_archive_unchanged: Bool,
+  live_email_retrieved: Bool,
+}
+
+worker email_archive_clone_commissioning
+  action prepare_disposable(session_id: String, confirmation: String) -> StageReceipt
+    timeout 2m
+
+  action rehearse_repair(session_id: String, preparation_code: String) -> RepairReceipt
+    timeout 5m
+
+  action reconcile_disposable(session_id: String, rehearsal_code: String) -> ReconciliationReceipt
+    timeout 5m
+
+  action backup_disposable(session_id: String, reconciliation_code: String) -> BackupReceipt
+    timeout 10m
+
+  action restore_disposable(session_id: String, backup_code: String) -> RestoreReceipt
+    timeout 10m
+
+  action finalize_disposable(session_id: String, restore_code: String) -> CommissioningSummary
+    timeout 1m
+
+step prepare_fixture
+  prepare_disposable(session_id: session_id, confirmation: confirmation) -> prepared
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)
+
+step rehearse_clone_repair
+  rehearse_repair(session_id: session_id, preparation_code: prepared.code) -> repaired
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)
+
+step reconcile_clone
+  reconcile_disposable(session_id: session_id, rehearsal_code: repaired.code) -> reconciled
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)
+
+step back_up_clone
+  backup_disposable(session_id: session_id, reconciliation_code: reconciled.code) -> backed_up
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)
+
+step restore_clone
+  restore_disposable(session_id: session_id, backup_code: backed_up.code) -> restored
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)
+
+step finalize_commissioning
+  finalize_disposable(session_id: session_id, restore_code: restored.code) -> summary
+  route commissioned(summary)
+
+  on failure
+    route blocked(status: "blocked_unverified", session_id: session_id, repair_rehearsed: false, accounts_reconciled: 0, differences: 0, backup_verified: false, restore_verified: false, live_archive_unchanged: false, live_email_retrieved: false)

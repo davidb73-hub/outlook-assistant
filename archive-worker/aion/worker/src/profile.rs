@@ -1,4 +1,4 @@
-//! The two deliberately isolated activity surfaces served by this package.
+//! The deliberately isolated activity surfaces served by this package.
 
 /// Which reviewed Aion activity surface one worker process serves.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7,6 +7,8 @@ pub enum Profile {
     Synthetic,
     /// Provider-profile reads with no archive or credential persistence.
     IdentityPreflight,
+    /// Production archive machinery constrained to disposable synthetic data.
+    CloneCommissioning,
 }
 
 const SYNTHETIC_ACTIONS: &[&str] = &[
@@ -22,9 +24,20 @@ const SYNTHETIC_ACTIONS: &[&str] = &[
 
 const IDENTITY_PREFLIGHT_ACTIONS: &[&str] = &["audit_identity_bindings"];
 
+const CLONE_COMMISSIONING_ACTIONS: &[&str] = &[
+    "prepare_disposable",
+    "rehearse_repair",
+    "reconcile_disposable",
+    "backup_disposable",
+    "restore_disposable",
+    "finalize_disposable",
+];
+
 const SYNTHETIC_DOCUMENT: &str = include_str!("../../three_account_archive_cycle.awl");
 const IDENTITY_PREFLIGHT_DOCUMENT: &str =
     include_str!("../../email_archive_identity_preflight.awl");
+const CLONE_COMMISSIONING_DOCUMENT: &str =
+    include_str!("../../email_archive_clone_commissioning.awl");
 
 impl Profile {
     /// The embedded AWL source used for both deployment and worker descriptors.
@@ -33,6 +46,7 @@ impl Profile {
         match self {
             Self::Synthetic => SYNTHETIC_DOCUMENT,
             Self::IdentityPreflight => IDENTITY_PREFLIGHT_DOCUMENT,
+            Self::CloneCommissioning => CLONE_COMMISSIONING_DOCUMENT,
         }
     }
 
@@ -42,6 +56,7 @@ impl Profile {
         match self {
             Self::Synthetic => "archive_ops",
             Self::IdentityPreflight => "email_archive_identity_preflight",
+            Self::CloneCommissioning => "email_archive_clone_commissioning",
         }
     }
 
@@ -51,6 +66,7 @@ impl Profile {
         match self {
             Self::Synthetic => SYNTHETIC_ACTIONS,
             Self::IdentityPreflight => IDENTITY_PREFLIGHT_ACTIONS,
+            Self::CloneCommissioning => CLONE_COMMISSIONING_ACTIONS,
         }
     }
 
@@ -60,6 +76,7 @@ impl Profile {
         match self {
             Self::Synthetic => "archive-worker/aion/synthetic-action.js",
             Self::IdentityPreflight => "archive-worker/aion/identity-preflight-action.js",
+            Self::CloneCommissioning => "archive-worker/aion/clone-commissioning-action.js",
         }
     }
 
@@ -69,6 +86,13 @@ impl Profile {
         match self {
             Self::Synthetic => "synthetic",
             Self::IdentityPreflight => "identity-preflight",
+            Self::CloneCommissioning => "clone-commissioning",
         }
+    }
+
+    /// Whether the Node adapter expects the action name before its JSON input.
+    #[must_use]
+    pub const fn passes_action_argument(self) -> bool {
+        !matches!(self, Self::IdentityPreflight)
     }
 }

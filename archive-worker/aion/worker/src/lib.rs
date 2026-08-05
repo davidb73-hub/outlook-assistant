@@ -168,7 +168,11 @@ mod tests {
 
     #[test]
     fn every_profile_compiles_and_advertises_every_handler() -> TestResult {
-        for profile in [Profile::Synthetic, Profile::IdentityPreflight] {
+        for profile in [
+            Profile::Synthetic,
+            Profile::IdentityPreflight,
+            Profile::CloneCommissioning,
+        ] {
             let declaration = Declaration::compile(profile)?;
             declaration.require_complete()?;
             for action in profile.actions() {

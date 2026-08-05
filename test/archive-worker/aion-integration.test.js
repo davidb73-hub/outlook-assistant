@@ -7,6 +7,13 @@ const {
   parseInput,
 } = require('../../archive-worker/aion/identity-preflight-action');
 const syntheticInput = require('../../archive-worker/aion/synthetic-input.json');
+const {
+  COMMISSIONING_CONFIRMATION,
+  cleanupDisposable,
+} = require('../../archive-worker/disposable-commissioning');
+const {
+  executeCloneCommissioningAction,
+} = require('../../archive-worker/aion/clone-commissioning-action');
 
 function runSyntheticCycle(fixture = syntheticInput) {
   const {
@@ -157,4 +164,102 @@ describe('Aion email archive integration', () => {
 
     expect(result.passed).toBe(false);
   });
+
+  test('keeps disposable commissioning behind exact inputs', async () => {
+    await expect(
+      executeCloneCommissioningAction('prepare_disposable', {
+        session_id: 'commissioning-input-test',
+        confirmation: 'wrong',
+      })
+    ).rejects.toThrow('DISPOSABLE_COMMISSIONING_CONFIRMATION_REQUIRED');
+    expect(() =>
+      executeCloneCommissioningAction('prepare_disposable', {
+        session_id: 'commissioning-input-test',
+        confirmation: COMMISSIONING_CONFIRMATION,
+        unexpected: true,
+      })
+    ).toThrow('DISPOSABLE_COMMISSIONING_INPUT_INVALID');
+    expect(() => executeCloneCommissioningAction('unknown', {})).toThrow(
+      'DISPOSABLE_COMMISSIONING_ACTION_UNKNOWN'
+    );
+  });
+
+  test('commissions the real archive machinery against a disposable clone', async () => {
+    const sessionId = `jest-${Date.now()}-${process.pid}`;
+    try {
+      const prepared = await executeCloneCommissioningAction(
+        'prepare_disposable',
+        {
+          session_id: sessionId,
+          confirmation: COMMISSIONING_CONFIRMATION,
+        }
+      );
+      const repaired = await executeCloneCommissioningAction(
+        'rehearse_repair',
+        {
+          session_id: sessionId,
+          preparation_code: prepared.code,
+        }
+      );
+      const reconciled = await executeCloneCommissioningAction(
+        'reconcile_disposable',
+        {
+          session_id: sessionId,
+          rehearsal_code: repaired.code,
+        }
+      );
+      const backedUp = await executeCloneCommissioningAction(
+        'backup_disposable',
+        {
+          session_id: sessionId,
+          reconciliation_code: reconciled.code,
+        }
+      );
+      const restored = await executeCloneCommissioningAction(
+        'restore_disposable',
+        {
+          session_id: sessionId,
+          backup_code: backedUp.code,
+        }
+      );
+      const summary = await executeCloneCommissioningAction(
+        'finalize_disposable',
+        {
+          session_id: sessionId,
+          restore_code: restored.code,
+        }
+      );
+
+      expect(repaired).toMatchObject({
+        ok: true,
+        second_run_noop: true,
+      });
+      expect(reconciled).toMatchObject({
+        ok: true,
+        accounts_reconciled: 3,
+        differences: 0,
+        integrity_ok: true,
+      });
+      expect(backedUp).toMatchObject({
+        ok: true,
+        snapshots_created: 2,
+        deduplication_observed: true,
+      });
+      expect(restored).toMatchObject({
+        ok: true,
+        database_hash_matches: true,
+        counts_match: true,
+      });
+      expect(summary).toMatchObject({
+        status: 'commissioned_disposable',
+        live_archive_unchanged: true,
+        live_email_retrieved: false,
+      });
+    } finally {
+      await cleanupDisposable({
+        sessionId,
+        confirmation: COMMISSIONING_CONFIRMATION,
+      }).catch(() => {});
+    }
+  }, 60_000);
 });

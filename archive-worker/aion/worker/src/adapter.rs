@@ -63,7 +63,11 @@ impl AdapterConfig {
         require_absolute_file(&node_bin, "EMAIL_ARCHIVE_NODE_BIN")?;
         require_absolute_directory(&repo_root, "EMAIL_ARCHIVE_REPO_ROOT")?;
         require_absolute_directory(&home, "EMAIL_ARCHIVE_HOME")?;
-        for profile in [Profile::Synthetic, Profile::IdentityPreflight] {
+        for profile in [
+            Profile::Synthetic,
+            Profile::IdentityPreflight,
+            Profile::CloneCommissioning,
+        ] {
             let adapter = repo_root.join(profile.adapter_path());
             require_absolute_file(&adapter, profile.adapter_path())?;
         }
@@ -93,7 +97,7 @@ impl AdapterConfig {
             .env_clear()
             .env("HOME", &self.home)
             .arg(self.repo_root.join(profile.adapter_path()));
-        if profile == Profile::Synthetic {
+        if profile.passes_action_argument() {
             command.arg(action);
         }
         let output = command

@@ -1,6 +1,6 @@
 # Aion integration for the private email archive
 
-This directory contains two deliberately separate Aion workflows:
+This directory contains three deliberately separate Aion workflows:
 
 1. `three_account_archive_cycle.awl` is a complete synthetic lifecycle test.
    Its Node adapter cannot read the network, environment, filesystem,
@@ -9,6 +9,10 @@ This directory contains two deliberately separate Aion workflows:
    It performs provider-profile reads only through the existing archive
    providers. It does not open the archive database, advance cursors, download
    messages, persist refreshed tokens, create backups, or change mailboxes.
+3. `email_archive_clone_commissioning.awl` exercises the production repair,
+   reconciliation, backup, and restore implementations against a disposable
+   archive and invented provider inventories. It reads only filesystem metadata
+   from the live archive to prove the disposable path is distinct and unchanged.
 
 There is intentionally no live full-cycle worker profile. The archive is currently
 paused for the reviewed Gmail identity remediation described in `PLAN.md`.
@@ -24,13 +28,16 @@ backup, and restore are approved would be unsafe.
 | `synthetic-input.json` | Invented three-account fixture |
 | `email_archive_identity_preflight.awl` | One-step live identity gate |
 | `identity-preflight-action.js` | Privacy-safe adapter to existing provider identity audits |
+| `email_archive_clone_commissioning.awl` | Six-step disposable commissioning workflow |
+| `clone-commissioning-action.js` | Narrow adapter to production archive code using synthetic evidence |
+| `../disposable-commissioning.js` | Strict temporary-path fixture, repair, reconciliation, backup, and restore harness |
 | `worker/` | Narrow Rust liminal-transport wrapper for the reviewed Node adapters |
 
 The transport wrapper is Rust because the active Aion server dispatches through
 its liminal outbox. The built-in gRPC shell worker registered during validation
 but never became dispatch-eligible on that path. The wrapper contains no email
 or archive domain logic; it compiles descriptors from these AWL files and calls
-only the two literal Node adapter paths above with a cleared child environment.
+only the three literal Node adapter paths above with a cleared child environment.
 
 These files are under `archive-worker/`, which is excluded from the public npm
 package allowlist in the root `package.json`.
@@ -65,15 +72,16 @@ These checks do not contact providers or the Aion server:
 ```sh
 "$AION_BIN" awl check archive-worker/aion/three_account_archive_cycle.awl
 "$AION_BIN" awl check archive-worker/aion/email_archive_identity_preflight.awl
+"$AION_BIN" awl check archive-worker/aion/email_archive_clone_commissioning.awl
 npm test -- --runInBand test/archive-worker/aion-integration.test.js
 cargo fmt --all --manifest-path archive-worker/aion/worker/Cargo.toml -- --check
 cargo test --locked --all-targets --manifest-path archive-worker/aion/worker/Cargo.toml
 cargo clippy --locked --all-targets --manifest-path archive-worker/aion/worker/Cargo.toml -- -D warnings
 ```
 
-Success evidence is two `ok:` lines, a passing Jest file, and green Rust gates.
+Success evidence is three `ok:` lines, a passing Jest file, and green Rust gates.
 
-Build both temporary worker binaries:
+Build all temporary worker binaries:
 
 ```sh
 cargo build --locked --bins --manifest-path archive-worker/aion/worker/Cargo.toml
@@ -121,6 +129,50 @@ The expected final result has `status: "completed"`, three synchronized
 accounts, zero discrepancies, and `synthetic-snapshot-9`. Stop the worker with
 Control-C after inspecting the durable history.
 
+## Run disposable commissioning
+
+This path uses the real database, repair, synchronization, Restic backup, and
+restore implementations. All messages, identities, provider inventories,
+backup credentials, and backup destinations are disposable fixtures. It does
+not contact providers, open the live database, apply the live Gmail repair, or
+enable scheduling.
+
+Start the dedicated worker from the repository root:
+
+```sh
+env -i \
+  AION_WORKER_ENDPOINT=127.0.0.1:7400 \
+  AION_WORKER_NAMESPACE=Practice \
+  AION_WORKER_IDENTITY=email-archive \
+  AION_WORKER_CONCURRENCY=1 \
+  AION_RECONNECT_INITIAL_BACKOFF_SECONDS=1 \
+  AION_RECONNECT_MAX_BACKOFF_SECONDS=5 \
+  AION_RECONNECT_MAX_ATTEMPTS=1000000 \
+  EMAIL_ARCHIVE_NODE_BIN="$EMAIL_ARCHIVE_NODE_BIN" \
+  EMAIL_ARCHIVE_REPO_ROOT="$PWD" \
+  EMAIL_ARCHIVE_HOME=/Users/davidbasseal \
+  RUST_LOG=info \
+  archive-worker/aion/worker/target/debug/email-archive-clone-commissioning-worker
+```
+
+Confirm `/awl/workers/availability` reports one connected worker for task queue
+`email_archive_clone_commissioning`, then run with a new lowercase session ID:
+
+```sh
+"$AION_BIN" \
+  --endpoint 127.0.0.1:50051 \
+  --namespace Practice \
+  run archive-worker/aion/email_archive_clone_commissioning.awl \
+  --input '{"session_id":"commissioning-example-0001","confirmation":"DISPOSABLE_ARCHIVE_COMMISSIONING_ONLY"}' \
+  --timeout 5m
+```
+
+A successful result is `commissioned_disposable`, with three reconciled
+accounts, zero differences, verified backup and restore, no live email
+retrieval, and a verified-unchanged live archive fingerprint. Stop the worker
+after inspecting history. Preserve the redacted receipt before deleting the
+matching directory below `/private/tmp/email-archive-aion-commissioning/`.
+
 ### Verified synthetic evidence
 
 Verified in namespace `Practice` on 5 August 2026:
@@ -149,6 +201,25 @@ Verified in namespace `Practice` on 6 August 2026:
 
 This proves only live provider-profile identity reads. It does not authorize
 mail retrieval, archive access, Gmail repair, scheduling, or backup operations.
+
+### Verified disposable commissioning evidence
+
+Verified in namespace `Practice` on 6 August 2026:
+
+- Workflow ID: `c24635f9-71c1-4705-abd2-568c6762eaea`
+- Run ID: `4d3e0469-8ce9-4fd6-a947-6bf473de6530`
+- Status: `Completed`
+- Durable events: 21
+- Activities: six completed on their first attempts, zero failed
+- Repair: two duplicates quarantined, one canonical moved, second invocation a no-op
+- Reconciliation: three accounts, nine synthetic inventory items, zero differences
+- Backup/restore: two local encrypted Restic snapshots, deduplication observed,
+  restored database/counts and all 11 blobs verified
+- Safety: the Aion run retrieved no live email and did not change the live
+  database or its post-diagnostic filesystem fingerprint
+
+The full evidence and the separate diagnostic-sidecar finding are recorded in
+`docs/remediation/aion-disposable-commissioning-2026-08-06.md`.
 
 ## Prepare credentials for the live identity preflight
 
