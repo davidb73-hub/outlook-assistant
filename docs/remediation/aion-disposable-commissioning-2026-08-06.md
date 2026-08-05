@@ -98,9 +98,22 @@ Use already-preserved evidence or a separately approved immutable/copy-based
 diagnostic method. Copying the archive itself also requires explicit approval
 because it contains live email.
 
+### Owner-authorized sidecar resolution
+
+On 6 August 2026, the owner explicitly authorized removal of only the two
+diagnostic-created SQLite sidecars. Before deletion, the scheduler was proved
+persistently disabled, no archive worker or worker lock existed, `lsof` found
+no open database handles, and both paths matched their recorded device, inode,
+size, regular-file, non-symlink, and single-link identities. The exact files
+`archive.sqlite3-wal` and `archive.sqlite3-shm` were removed. A subsequent
+metadata comparison proved the main database device, inode, size, and
+modification time were unchanged. No database connection, provider request,
+Gmail repair, scheduling change, or GitHub operation was performed.
+
 ## Remaining approval gates
 
-1. Decide how the newly created empty SQLite sidecars should be handled.
+1. ~~Decide how the newly created empty SQLite sidecars should be handled.~~
+   Resolved by the owner-authorized, identity-checked removal recorded above.
 2. Authorize fresh live Gmail inventory retrieval before generating a new exact
    repair plan and rehearsal receipt.
 3. Review that exact plan and separately authorize live Gmail repair.
