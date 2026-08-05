@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
-const SqliteDatabase = require('better-sqlite3');
+const { ImmutableSqliteDatabase } = require('./immutable-sqlite');
 const { ArchiveDatabase } = require('./database');
 const { BackupManager, fileHash } = require('./backup');
 const { WorkerLock } = require('./lock');
@@ -12,6 +12,7 @@ const {
   assertExplicitLiveRoot,
   assertLiveServiceQuiesced,
   currentSchemaVersion,
+  inspectArchiveDatabaseOpenHandles,
   inspectArchiveWorkerProcesses,
   inspectSchedulerDisabled,
 } = require('./live-gmail-partition-repair');
@@ -95,7 +96,7 @@ async function assertNewEmptyRestoreTarget(target) {
 async function verifyExactPreRepairRestore({
   restoreTarget,
   expectedSnapshotId,
-  DatabaseImpl = SqliteDatabase,
+  DatabaseImpl = ImmutableSqliteDatabase,
   ArchiveDatabaseImpl = ArchiveDatabase,
 } = {}) {
   if (!expectedSnapshotId) {
@@ -259,12 +260,13 @@ async function createSchemaPreservingPreRepairBackup({
   restoreTarget,
   receiptOutputPath,
   confirmation,
-  DatabaseImpl = SqliteDatabase,
+  DatabaseImpl = ImmutableSqliteDatabase,
   ArchiveDatabaseImpl = ArchiveDatabase,
   LockImpl = WorkerLock,
   BackupManagerImpl = BackupManager,
   schedulerInspector = inspectSchedulerDisabled,
   processInspector = inspectArchiveWorkerProcesses,
+  databaseHandleInspector = inspectArchiveDatabaseOpenHandles,
   backupManagerOptions = {},
 } = {}) {
   if (confirmation !== PRE_REPAIR_BACKUP_CONFIRMATION) {
@@ -279,6 +281,7 @@ async function createSchemaPreservingPreRepairBackup({
     liveRoot: paths.liveRoot,
     schedulerInspector,
     processInspector,
+    databaseHandleInspector,
   });
   const lock = new LockImpl(paths.liveRoot);
   let database = null;
@@ -286,12 +289,17 @@ async function createSchemaPreservingPreRepairBackup({
   try {
     const scheduler = await schedulerInspector();
     const processes = await processInspector();
+    const databaseHandles = await databaseHandleInspector({
+      liveRoot: paths.liveRoot,
+    });
     if (
       scheduler?.label !== ARCHIVE_LAUNCHD_LABEL ||
       scheduler?.loaded !== false ||
       scheduler?.persistentlyDisabled !== true ||
       processes?.running !== false ||
-      processes?.matchingProcessCount !== 0
+      processes?.matchingProcessCount !== 0 ||
+      databaseHandles?.open !== false ||
+      databaseHandles?.matchingProcessCount !== 0
     ) {
       throw backupError('PRE_REPAIR_BACKUP_QUIESCENCE_CHANGED');
     }

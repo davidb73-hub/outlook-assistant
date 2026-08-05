@@ -4,6 +4,7 @@ const fsPromises = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 const SqliteDatabase = require('better-sqlite3');
+const { ImmutableSqliteDatabase } = require('./immutable-sqlite');
 const { DEFAULT_ARCHIVE_ROOT } = require('./config');
 const { MIGRATIONS } = require('./migrations');
 const { WorkerLock } = require('./lock');
@@ -366,6 +367,52 @@ async function inspectArchiveWorkerProcesses({
   return { running: false, matchingProcessCount: 0 };
 }
 
+async function inspectArchiveDatabaseOpenHandles({
+  liveRoot,
+  runner = runProcessCapture,
+} = {}) {
+  const databasePath = path.join(fs.realpathSync(liveRoot), 'archive.sqlite3');
+  let handles;
+  try {
+    handles = await runner('/usr/sbin/lsof', [
+      '-F',
+      'pfn',
+      '--',
+      databasePath,
+      `${databasePath}-wal`,
+      `${databasePath}-shm`,
+    ]);
+  } catch (error) {
+    throw liveRepairError(
+      'GMAIL_LIVE_REPAIR_DATABASE_HANDLES_AMBIGUOUS',
+      'open database handles could not be inspected',
+      error
+    );
+  }
+  if (handles?.code === 1 && !String(handles.stdout || '').trim()) {
+    return { open: false, matchingProcessCount: 0 };
+  }
+  if (handles?.code !== 0) {
+    throw liveRepairError(
+      'GMAIL_LIVE_REPAIR_DATABASE_HANDLES_AMBIGUOUS',
+      'lsof did not prove that the archive database has no open handles'
+    );
+  }
+  const processIds = new Set(
+    String(handles.stdout || '')
+      .split('\n')
+      .filter((line) => /^p\d+$/.test(line))
+      .map((line) => Number(line.slice(1)))
+  );
+  if (processIds.size > 0) {
+    throw liveRepairError(
+      'GMAIL_LIVE_REPAIR_EXTERNAL_DATABASE_HANDLE_ACTIVE',
+      'another process has the live database or a SQLite sidecar open'
+    );
+  }
+  return { open: false, matchingProcessCount: 0 };
+}
+
 async function assertNoWorkerLock(liveRoot) {
   const lockPath = path.join(liveRoot, 'worker.lock');
   try {
@@ -384,6 +431,7 @@ async function assertLiveServiceQuiesced({
   liveRoot,
   schedulerInspector = inspectSchedulerDisabled,
   processInspector = inspectArchiveWorkerProcesses,
+  databaseHandleInspector = inspectArchiveDatabaseOpenHandles,
 } = {}) {
   const scheduler = await schedulerInspector();
   if (
@@ -404,7 +452,14 @@ async function assertLiveServiceQuiesced({
     );
   }
   const worker = await assertNoWorkerLock(liveRoot);
-  return { scheduler, processes, worker };
+  const databaseHandles = await databaseHandleInspector({ liveRoot });
+  if (
+    databaseHandles?.open !== false ||
+    databaseHandles?.matchingProcessCount !== 0
+  ) {
+    throw liveRepairError('GMAIL_LIVE_REPAIR_DATABASE_HANDLES_AMBIGUOUS');
+  }
+  return { scheduler, processes, worker, databaseHandles };
 }
 
 function assertOwnedWorkerLock(liveRoot) {
@@ -427,7 +482,10 @@ function assertOwnedWorkerLock(liveRoot) {
   }
 }
 
-function openReadOnlyDatabase(DatabaseImpl, databasePath) {
+function openReadOnlyDatabase(
+  DatabaseImpl = ImmutableSqliteDatabase,
+  databasePath
+) {
   const database = new DatabaseImpl(databasePath, {
     readonly: true,
     fileMustExist: true,
@@ -1186,9 +1244,10 @@ async function buildLiveGmailPartitionRepairPlan({
   backupMarkerPath,
   preRepairRestoreReceiptPath,
   contaminationWindow,
-  DatabaseImpl = SqliteDatabase,
+  DatabaseImpl = ImmutableSqliteDatabase,
   schedulerInspector = inspectSchedulerDisabled,
   processInspector = inspectArchiveWorkerProcesses,
+  databaseHandleInspector = inspectArchiveDatabaseOpenHandles,
   identityStatusBuilder = buildIdentityStatus,
   gmailProviderFactory = null,
   identityProviderFactory = null,
@@ -1203,6 +1262,7 @@ async function buildLiveGmailPartitionRepairPlan({
     liveRoot: paths.liveRoot,
     schedulerInspector,
     processInspector,
+    databaseHandleInspector,
   });
   const evidence = await prepareReadOnlyEvidence({
     config,
@@ -1328,9 +1388,11 @@ async function applyLiveGmailPartitionRepair({
   backupMarkerPath,
   preRepairRestoreReceiptPath,
   DatabaseImpl = SqliteDatabase,
+  ReadOnlyDatabaseImpl = ImmutableSqliteDatabase,
   LockImpl = WorkerLock,
   schedulerInspector = inspectSchedulerDisabled,
   processInspector = inspectArchiveWorkerProcesses,
+  databaseHandleInspector = inspectArchiveDatabaseOpenHandles,
   identityStatusBuilder = buildIdentityStatus,
   gmailProviderFactory = null,
   identityProviderFactory = null,
@@ -1367,6 +1429,7 @@ async function applyLiveGmailPartitionRepair({
     liveRoot: paths.liveRoot,
     schedulerInspector,
     processInspector,
+    databaseHandleInspector,
   });
   await preflightLivePlanEvidence({
     envelope,
@@ -1403,6 +1466,15 @@ async function applyLiveGmailPartitionRepair({
         'archive worker process absence changed after lock acquisition'
       );
     }
+    const databaseHandles = await databaseHandleInspector({
+      liveRoot: paths.liveRoot,
+    });
+    if (
+      databaseHandles?.open !== false ||
+      databaseHandles?.matchingProcessCount !== 0
+    ) {
+      throw liveRepairError('GMAIL_LIVE_REPAIR_DATABASE_HANDLES_AMBIGUOUS');
+    }
     evidence = await prepareReadOnlyEvidence({
       config,
       paths,
@@ -1412,7 +1484,7 @@ async function applyLiveGmailPartitionRepair({
       snapshotManifestPath,
       backupMarkerPath,
       preRepairRestoreReceiptPath,
-      DatabaseImpl,
+      DatabaseImpl: ReadOnlyDatabaseImpl,
       nowFn,
       maxEvidenceAgeMs,
       onProgress,
@@ -1595,6 +1667,7 @@ module.exports = {
   currentSchemaVersion,
   inspectSchedulerDisabled,
   inspectArchiveWorkerProcesses,
+  inspectArchiveDatabaseOpenHandles,
   livePlanEnvelopeDigest,
   preflightLivePlanEvidence,
   readVerifiedCloneRepairReceipt,

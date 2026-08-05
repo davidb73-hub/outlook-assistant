@@ -22,6 +22,7 @@ const {
   buildLiveGmailPartitionRepairPlan,
   currentSchemaVersion,
   createLiveRepairOwnerApproval,
+  inspectArchiveDatabaseOpenHandles,
   inspectArchiveWorkerProcesses,
   inspectSchedulerDisabled,
   livePlanEnvelopeDigest,
@@ -33,6 +34,9 @@ const {
   partitionRepairPlanDigest,
   repairGmailPartitions,
 } = require('../../archive-worker/repair-gmail-partitions');
+const {
+  ImmutableSqliteDatabase,
+} = require('../../archive-worker/immutable-sqlite');
 const {
   assertCliSchemaMigrationSafe,
   liveRepairModeArguments,
@@ -96,6 +100,11 @@ function explicitConfig(root) {
 }
 
 const OPERATOR_NOW = Date.parse('2026-08-02T14:00:00.000Z');
+const NODE_SQLITE_SUPPORTED = Number(process.versions.node.split('.')[0]) >= 22;
+
+function readOnlyDatabaseOptions() {
+  return NODE_SQLITE_SUPPORTED ? {} : { DatabaseImpl: SqliteDatabase };
+}
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -225,6 +234,7 @@ function providerHarness(config, inventories, verifiedAt) {
 async function createOperatorEvidence(liveRoot, root) {
   const liveDatabasePath = path.join(liveRoot, 'archive.sqlite3');
   const liveDatabase = new SqliteDatabase(liveDatabasePath);
+  liveDatabase.pragma('journal_mode = WAL');
   seedIdentityEvidence(liveDatabase);
   const tableCounts = Object.fromEntries(
     ['accounts', 'messages', 'attachments', 'blobs'].map((table) => [
@@ -237,7 +247,11 @@ async function createOperatorEvidence(liveRoot, root) {
   fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
   const snapshotDatabasePath = path.join(snapshotRoot, 'archive.sqlite3');
   await liveDatabase.backup(snapshotDatabasePath);
+  liveDatabase.pragma('wal_checkpoint(TRUNCATE)');
   liveDatabase.close();
+  for (const suffix of ['-wal', '-shm']) {
+    fs.rmSync(`${liveDatabasePath}${suffix}`, { force: true });
+  }
   fs.chmodSync(snapshotDatabasePath, 0o600);
 
   const blobs = [];
@@ -378,6 +392,10 @@ function quiescenceHarness() {
       running: false,
       matchingProcessCount: 0,
     })),
+    databaseHandleInspector: jest.fn(() => ({
+      open: false,
+      matchingProcessCount: 0,
+    })),
   };
 }
 
@@ -411,7 +429,9 @@ async function prepareExactOperatorPlan({ liveRoot, root }) {
     gmailProviderFactory: buildProviders.gmailProviderFactory,
     schedulerInspector: quiescence.schedulerInspector,
     processInspector: quiescence.processInspector,
+    databaseHandleInspector: quiescence.databaseHandleInspector,
     nowFn: () => OPERATOR_NOW,
+    ...readOnlyDatabaseOptions(),
   });
   const after = {
     sha256: sha256(fs.readFileSync(evidence.liveDatabasePath)),
@@ -466,7 +486,9 @@ function operatorApplyArguments(fixture, applyProviders, overrides = {}) {
     gmailProviderFactory: applyProviders.gmailProviderFactory,
     schedulerInspector: fixture.quiescence.schedulerInspector,
     processInspector: fixture.quiescence.processInspector,
+    databaseHandleInspector: fixture.quiescence.databaseHandleInspector,
     nowFn: () => OPERATOR_NOW + 120_000,
+    ...(NODE_SQLITE_SUPPORTED ? {} : { ReadOnlyDatabaseImpl: SqliteDatabase }),
     ...overrides,
   };
 }
@@ -742,6 +764,33 @@ describe('owner-gated live Gmail partition repair safety surface', () => {
     });
   });
 
+  test('requires a proven absence of archive database handles', async () => {
+    await expect(
+      inspectArchiveDatabaseOpenHandles({
+        liveRoot,
+        runner: () => ({ code: 1, stdout: '', stderr: '' }),
+      })
+    ).resolves.toEqual({ open: false, matchingProcessCount: 0 });
+
+    await expect(
+      inspectArchiveDatabaseOpenHandles({
+        liveRoot,
+        runner: () => ({
+          code: 0,
+          stdout: 'p123\nf3\narchive.sqlite3-shm\n',
+          stderr: '',
+        }),
+      })
+    ).rejects.toThrow('GMAIL_LIVE_REPAIR_EXTERNAL_DATABASE_HANDLE_ACTIVE');
+
+    await expect(
+      inspectArchiveDatabaseOpenHandles({
+        liveRoot,
+        runner: () => ({ code: 2, stdout: '', stderr: 'failed' }),
+      })
+    ).rejects.toThrow('GMAIL_LIVE_REPAIR_DATABASE_HANDLES_AMBIGUOUS');
+  });
+
   test('quiescence requires no process and no pre-existing lock', async () => {
     const schedulerInspector = async () => ({
       label: ARCHIVE_LAUNCHD_LABEL,
@@ -752,11 +801,16 @@ describe('owner-gated live Gmail partition repair safety surface', () => {
       running: false,
       matchingProcessCount: 0,
     });
+    const databaseHandleInspector = () => ({
+      open: false,
+      matchingProcessCount: 0,
+    });
     await expect(
       assertLiveServiceQuiesced({
         liveRoot,
         schedulerInspector,
         processInspector,
+        databaseHandleInspector,
       })
     ).resolves.toEqual(
       expect.objectContaining({ worker: { lockPresent: false } })
@@ -768,6 +822,7 @@ describe('owner-gated live Gmail partition repair safety surface', () => {
         liveRoot,
         schedulerInspector,
         processInspector,
+        databaseHandleInspector,
       })
     ).rejects.toThrow('GMAIL_LIVE_REPAIR_WORKER_LOCK_PRESENT');
   });
@@ -956,7 +1011,18 @@ describe('owner-gated live Gmail partition repair safety surface', () => {
     expect(fixture.after.sha256).toBe(fixture.before.sha256);
     expect(fixture.after.stat.ino).toBe(fixture.before.stat.ino);
     expect(fixture.after.stat.mtimeNs).toBe(fixture.before.stat.mtimeNs);
-    const plannedDatabase = new SqliteDatabase(
+    if (NODE_SQLITE_SUPPORTED) {
+      expect(fs.existsSync(`${fixture.evidence.liveDatabasePath}-wal`)).toBe(
+        false
+      );
+      expect(fs.existsSync(`${fixture.evidence.liveDatabasePath}-shm`)).toBe(
+        false
+      );
+    }
+    const ReadOnlyDatabase = NODE_SQLITE_SUPPORTED
+      ? ImmutableSqliteDatabase
+      : SqliteDatabase;
+    const plannedDatabase = new ReadOnlyDatabase(
       fixture.evidence.liveDatabasePath,
       { readonly: true, fileMustExist: true }
     );
@@ -1017,7 +1083,10 @@ describe('owner-gated live Gmail partition repair safety surface', () => {
 
   test('rolls schema and archive content back to version 7 after an induced core failure', async () => {
     const fixture = await prepareExactOperatorPlan({ liveRoot, root });
-    const before = new SqliteDatabase(fixture.evidence.liveDatabasePath, {
+    const ReadOnlyDatabase = NODE_SQLITE_SUPPORTED
+      ? ImmutableSqliteDatabase
+      : SqliteDatabase;
+    const before = new ReadOnlyDatabase(fixture.evidence.liveDatabasePath, {
       readonly: true,
       fileMustExist: true,
     });

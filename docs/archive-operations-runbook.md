@@ -350,6 +350,20 @@ blocked from opening an existing schema-7 live archive because their normal
 database constructor would silently migrate it. Leave launchd persistently
 disabled throughout every step below.
 
+The archive scheduler is not the only possible database reader. Pause every
+dashboard, drafting service, maintenance job, and other process that can open
+the archive for the entire operation. Every guarded command uses `lsof` before
+opening SQLite and fails unless no process has the main database, WAL, or SHM
+file open. Backup and apply repeat that check after acquiring the worker lock;
+planning does not acquire a lock. The lock coordinates this repository's
+worker; it cannot prevent an unrelated application from opening SQLite.
+
+The guarded backup and planning commands require Node.js 22 or 24. Their strict
+read path uses SQLite `immutable=1` through `node:sqlite`, rejects either
+pre-existing SQLite sidecar, and verifies that the database inode, size, and
+modification time remain unchanged. It fails closed on runtimes without that
+capability; do not substitute a normal `better-sqlite3` read-only connection.
+
 ### 1. Create and exactly restore a fresh pre-repair backup
 
 Choose a new empty temporary restore directory. The receipt must be a new
@@ -363,13 +377,15 @@ npm run archive:pre-repair-backup -- \
   --confirm-schema-preserving-backup
 ```
 
-This command acquires the archive lock before opening SQLite, verifies the
-existing Keychain password and encrypted Restic repository before replacing the
-current snapshot, creates a schema-7 snapshot, restores that exact Restic
-snapshot, and verifies database hash, counts, integrity, foreign keys, FTS, and
-every blob. It tests migration recognition only on a disposable copied database.
-The retained restore and live database remain schema 7 and manifest-identical.
-The command refuses to overwrite an existing receipt.
+This command proves that no database handles are open, acquires the archive
+lock, proves handle absence again, and then opens SQLite through the strict
+immutable read path. It verifies the existing Keychain password and encrypted
+Restic repository before replacing the current snapshot, creates a schema-7
+snapshot, restores that exact Restic snapshot, and verifies database hash,
+counts, integrity, foreign keys, FTS, and every blob. It tests migration
+recognition only on a disposable copied database. The retained restore and live
+database remain schema 7 and manifest-identical. The command refuses to
+overwrite an existing receipt or proceed while a WAL or SHM sidecar exists.
 
 The restore contains `migration-recognition.sqlite3`, a disposable schema-11
 copy of the retained schema-7 database. To make the self-contained rehearsal
@@ -405,13 +421,14 @@ npm run archive:live-gmail-repair -- \
   --plan-output /private/tmp/email-archive-reviewed-live-plan-....json
 ```
 
-Planning opens the live, snapshot, and anchor databases read-only with SQLite
-`query_only`; it does not acquire the apply lock, migrate schema, or write the
-archive. Review the content-free output, including action counts, provider-only
-backlog, and `derivedStateToReset`. The latter reports Gmail folder and cursor
-rows that will be preserved in provenance and then cleared so reconciliation
-can rebuild them under proved identities. The exact 64-character plan digest
-is the value the owner approves. Plans and evidence expire after 24 hours.
+Planning opens the live, snapshot, and anchor databases with SQLite
+`immutable=1` and `query_only`. This avoids SQLite creating WAL or SHM files. It
+does not acquire the apply lock, migrate schema, or write the archive. Review
+the content-free output, including action counts, provider-only backlog, and
+`derivedStateToReset`. The latter reports Gmail folder and cursor rows that
+will be preserved in provenance and then cleared so reconciliation can rebuild
+them under proved identities. The exact 64-character plan digest is the value
+the owner approves. Plans and evidence expire after 24 hours.
 
 ### 3. Rehearse that exact live plan on the restored clone
 

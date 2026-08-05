@@ -110,18 +110,51 @@ metadata comparison proved the main database device, inode, size, and
 modification time were unchanged. No database connection, provider request,
 Gmail repair, scheduling change, or GitHub operation was performed.
 
+The guarded pre-repair backup and live-plan code was then corrected before any
+further live operation. It now uses SQLite `immutable=1` through Node's
+`node:sqlite` API, rejects any pre-existing WAL or SHM path, and verifies the
+database metadata remains unchanged when the connection closes. WAL-mode
+synthetic tests cover the backup and exact-plan paths and prove neither
+recreates source sidecars. No live database was opened to test this correction.
+
+### External archive consumer discovered after cleanup
+
+Later on 6 August, a new WAL/SHM pair appeared with different inodes from the
+removed diagnostic pair: WAL inode `75160005` (zero bytes) and SHM inode
+`75160006` (32 KiB), both created at 09:11:33 AEST. The main database retained
+device `16777231`, inode `60428152`, size `2419032064`, and modification time
+03 August 07:30:23 AEST.
+
+At approximately 09:13, `lsof` identified Python PID `91708` holding the main
+database and both sidecars. macOS launchd evidence associated that process with
+`com.vitasci.draft-replies`, a separate Command Centre/Hannibal drafting job.
+That proves the job used the files; it does **not** prove which process created
+them at 09:11. The continuously available `com.davidbasseal.briefing` service
+is another archive consumer. At the final metadata check no handles were open,
+but the new sidecars remained unchanged.
+
+The earlier removal approval applied only to the original, identity-checked
+diagnostic pair. It does not authorize deleting this new pair or pausing these
+separate services. Commissioning now requires a controlled window in which all
+archive consumers are paused and zero open handles are proved. The code also
+fails closed when any external database handle is present.
+
 ## Remaining approval gates
 
 1. ~~Decide how the newly created empty SQLite sidecars should be handled.~~
    Resolved by the owner-authorized, identity-checked removal recorded above.
-2. Authorize fresh live Gmail inventory retrieval before generating a new exact
+2. Authorize a controlled commissioning window: pause all external archive
+   consumers, prove zero open handles, and separately decide whether the new
+   identity-checked sidecar pair may be removed.
+3. Authorize a fresh schema-preserving backup and exact restore verification.
+4. Authorize live Gmail inventory retrieval before generating a new exact
    repair plan and rehearsal receipt.
-3. Review that exact plan and separately authorize live Gmail repair.
-4. Authorize guarded live reconciliation, which can retrieve email and modify
+5. Review that exact plan and separately authorize live Gmail repair.
+6. Authorize guarded live reconciliation, which can retrieve email and modify
    the archive.
-5. Verify the production backup and restore evidence after the approved repair.
-6. Explicitly authorize scheduling only after the live acceptance gates pass.
-7. Review and explicitly authorize any GitHub push.
+7. Verify the production backup and restore evidence after the approved repair.
+8. Explicitly authorize scheduling only after the live acceptance gates pass.
+9. Review and explicitly authorize any GitHub push.
 
 No live Gmail repair, mailbox mutation, scheduling change, or GitHub push was
 performed during this commissioning run.

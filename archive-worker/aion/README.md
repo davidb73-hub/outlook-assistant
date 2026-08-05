@@ -52,7 +52,9 @@ synthetic-capable but its live preflight will be incomplete.
 ## Prerequisites
 
 - Work from the repository root.
-- Node.js, Rust, and installed repository dependencies.
+- Node.js 22 or 24, Rust, and installed repository dependencies. The guarded
+  live archive backup and planning gates require `node:sqlite` immutable URI
+  support and fail closed on older runtimes.
 - Aion CLI/server 0.11.0 with deployment and workers enabled.
 - Namespace `Practice` for testing.
 - For the live preflight only: the existing local `.env` and OAuth token files.
@@ -221,6 +223,12 @@ Verified in namespace `Practice` on 6 August 2026:
 The full evidence and the separate diagnostic-sidecar finding are recorded in
 `docs/remediation/aion-disposable-commissioning-2026-08-06.md`.
 
+After owner-authorized removal of the two diagnostic-created sidecars, the
+guarded backup and live-plan readers were changed to SQLite `immutable=1` via
+`node:sqlite`. Synthetic WAL-mode tests prove those paths do not recreate WAL
+or SHM files. This correction does not authorize a live backup, provider
+inventory request, repair, reconciliation, or schedule change.
+
 ## Prepare credentials for the live identity preflight
 
 This integration reuses existing configuration; it does not create OAuth apps
@@ -289,9 +297,13 @@ worker with Control-C afterward.
 - Enabling scheduling
 - Creating or restoring the production backup
 
-Those operations remain gated by `PLAN.md` and `ACCEPTANCE.md`. The next live
-integration stage is to implement and test action adapters against disposable
-archive clones, then obtain explicit approval before touching live state.
+Those operations remain gated by `PLAN.md` and `ACCEPTANCE.md`. Disposable
+adapter commissioning is complete. Before the fresh pre-repair backup, every
+other application that reads the archive must be paused and the absence of
+open database handles and SQLite sidecars proved. The next data-access gate is
+then explicit approval for live Gmail inventory collection to generate and
+rehearse a new, expiring exact repair plan; applying that plan remains a
+separate approval.
 
 The repository's `npm audit --omit=dev` gate passes after patch-level
 transitive dependency updates, including the reviewed Hono security override.

@@ -14,10 +14,19 @@ const {
   PRE_REPAIR_BACKUP_CONFIRMATION,
   createSchemaPreservingPreRepairBackup,
 } = require('../../archive-worker/pre-repair-backup');
+const {
+  ImmutableSqliteDatabase,
+} = require('../../archive-worker/immutable-sqlite');
 const { readExistingSchemaVersion } = require('../../archive-worker/index');
+
+const NODE_SQLITE_SUPPORTED = Number(process.versions.node.split('.')[0]) >= 22;
+const TEST_READ_ONLY_DATABASE = NODE_SQLITE_SUPPORTED
+  ? ImmutableSqliteDatabase
+  : SqliteDatabase;
 
 function createSchemaSevenDatabase(databasePath) {
   const database = new SqliteDatabase(databasePath);
+  database.pragma('journal_mode = WAL');
   database.exec(`
     CREATE TABLE schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -43,7 +52,11 @@ function createSchemaSevenDatabase(databasePath) {
        ) VALUES ('gmail-ablative', 'gmail', 'Ablative', 1, ?, ?)`
     )
     .run('2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z');
+  database.pragma('wal_checkpoint(TRUNCATE)');
   database.close();
+  for (const suffix of ['-wal', '-shm']) {
+    fs.rmSync(`${databasePath}${suffix}`, { force: true });
+  }
 }
 
 function hash(filePath) {
@@ -132,6 +145,7 @@ describe('schema-preserving pre-repair encrypted backup', () => {
       restoreTarget,
       receiptOutputPath,
       confirmation: PRE_REPAIR_BACKUP_CONFIRMATION,
+      DatabaseImpl: TEST_READ_ONLY_DATABASE,
       schedulerInspector: async () => ({
         label: ARCHIVE_LAUNCHD_LABEL,
         loaded: false,
@@ -139,6 +153,10 @@ describe('schema-preserving pre-repair encrypted backup', () => {
       }),
       processInspector: async () => ({
         running: false,
+        matchingProcessCount: 0,
+      }),
+      databaseHandleInspector: () => ({
+        open: false,
         matchingProcessCount: 0,
       }),
       backupManagerOptions: {
@@ -167,10 +185,16 @@ describe('schema-preserving pre-repair encrypted backup', () => {
         }),
       })
     );
-    expect(readExistingSchemaVersion(databasePath)).toBe(7);
+    expect(
+      readExistingSchemaVersion(databasePath, TEST_READ_ONLY_DATABASE)
+    ).toBe(7);
     expect(hash(databasePath)).toBe(beforeHash);
     const afterStat = fs.statSync(databasePath, { bigint: true });
     expect(afterStat.mtimeNs).toBe(beforeStat.mtimeNs);
+    if (NODE_SQLITE_SUPPORTED) {
+      expect(fs.existsSync(`${databasePath}-wal`)).toBe(false);
+      expect(fs.existsSync(`${databasePath}-shm`)).toBe(false);
+    }
     expect(fs.existsSync(path.join(liveRoot, 'worker.lock'))).toBe(false);
     expect(fs.statSync(receiptOutputPath).mode & 0o777).toBe(0o600);
     expect(JSON.parse(fs.readFileSync(receiptOutputPath, 'utf8'))).toEqual(
@@ -218,6 +242,7 @@ describe('schema-preserving pre-repair encrypted backup', () => {
           'pre-repair-restore-missing-password.json'
         ),
         confirmation: PRE_REPAIR_BACKUP_CONFIRMATION,
+        DatabaseImpl: TEST_READ_ONLY_DATABASE,
         schedulerInspector: async () => ({
           label: ARCHIVE_LAUNCHD_LABEL,
           loaded: false,
@@ -225,6 +250,10 @@ describe('schema-preserving pre-repair encrypted backup', () => {
         }),
         processInspector: async () => ({
           running: false,
+          matchingProcessCount: 0,
+        }),
+        databaseHandleInspector: () => ({
+          open: false,
           matchingProcessCount: 0,
         }),
         backupManagerOptions: {
