@@ -40,6 +40,10 @@ function buildGmailAccountConfig(env, accountKey) {
       prefix('ACCOUNT_LABEL') ||
       (isLegacyAblative ? env.GMAIL_ACCOUNT_LABEL : null) ||
       `${titleCase(accountKey)} / Gmail`,
+    expectedEmail:
+      prefix('EXPECTED_EMAIL') ||
+      (isLegacyAblative ? env.GMAIL_EXPECTED_EMAIL : '') ||
+      '',
     clientId:
       prefix('CLIENT_ID') ||
       (isLegacyAblative ? env.GMAIL_CLIENT_ID : '') ||

@@ -18,6 +18,29 @@ function safeError(error) {
   };
 }
 
+function safeIdentityError(account, error) {
+  const providerPrefix = String(account.provider || '').toUpperCase();
+  const suppliedCode = String(error?.code || '');
+  return {
+    code: /^[A-Z0-9_]{1,80}$/.test(suppliedCode)
+      ? suppliedCode
+      : `${providerPrefix}_IDENTITY_PROFILE_FAILED`,
+    message: `${account.provider} identity verification failed for ${account.id}`,
+    retryable: error?.retryable !== false,
+  };
+}
+
+function identityFailureResult(account, error) {
+  return {
+    accountId: account.id,
+    status: 'failed',
+    discovered: 0,
+    archived: 0,
+    errors: 1,
+    error: safeIdentityError(account, error),
+  };
+}
+
 function isGmailRateLimit(account, error) {
   return (
     account.provider === 'gmail' &&
@@ -40,6 +63,40 @@ class ArchiveSyncEngine {
     this.service = service;
     this.config = config;
     this.providerFactory = providerFactory;
+  }
+
+  async assertAccountIdentity(account, provider) {
+    const providerPrefix = String(account.provider || '').toUpperCase();
+    if (typeof provider.assertArchiveIdentity !== 'function') {
+      const error = new Error(
+        `${account.provider} identity guard is unavailable for ${account.id}`
+      );
+      error.code = `${providerPrefix}_IDENTITY_GUARD_UNAVAILABLE`;
+      error.retryable = false;
+      throw error;
+    }
+    const status = await provider.assertArchiveIdentity();
+    if (
+      status?.logicalAccountId !== (account.logicalAccountId || account.id) ||
+      status?.identityMatch !== true ||
+      status?.expectedIdentityConfigured !== true ||
+      status?.errorCode
+    ) {
+      const error = new Error(
+        `${account.provider} identity verification failed for ${account.id}`
+      );
+      error.code = status?.errorCode || `${providerPrefix}_IDENTITY_MISMATCH`;
+      error.retryable = false;
+      throw error;
+    }
+    return {
+      logicalAccountId: status.logicalAccountId,
+      credentialSlot: status.credentialSlot,
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: status.verifiedAt,
+      errorCode: null,
+    };
   }
 
   async recordLocations(account, provider) {
@@ -137,7 +194,8 @@ class ArchiveSyncEngine {
       if (archived.archive_state === 'archived_complete') {
         this.database.resolveIngestionErrors(
           account.id,
-          archived.provider_message_id
+          archived.provider_message_id,
+          { runId }
         );
       }
     }
@@ -180,9 +238,22 @@ class ArchiveSyncEngine {
 
   async runAccountCycle(account) {
     const provider = this.providerFactory(account);
+    let identityGuard;
+    try {
+      // Identity proof is deliberately outside the run transaction and before
+      // every archive read or write. A failed binding must leave no archive
+      // run, error, folder, message, or cursor record for this account.
+      identityGuard = await this.assertAccountIdentity(account, provider);
+    } catch (error) {
+      return identityFailureResult(account, error);
+    }
+    this.database.interruptRunningRuns('worker_recovered_after_interruption', {
+      accountIds: [account.id],
+    });
+    this.database.upsertAccount(account);
     const runId = this.database.beginRun(account.id, 'scheduled_cycle');
     const counts = { discovered: 0, archived: 0, errors: 0 };
-    const details = { phases: [] };
+    const details = { phases: [], identityGuard };
     try {
       const locations = await this.recordLocations(account, provider);
       details.locationCount = locations.length;
@@ -298,7 +369,24 @@ class ArchiveSyncEngine {
 
       const status = counts.errors === 0 ? 'completed' : 'failed';
       this.database.finishRun(runId, status, counts, details);
-      return { accountId: account.id, status, ...counts, details };
+      const resolvedAccountCycleErrors =
+        status === 'completed'
+          ? this.database.resolveAccountCycleErrors({
+              accountId: account.id,
+              successfulRunId: runId,
+              resolutionCode:
+                account.provider === 'gmail'
+                  ? 'GMAIL_IDENTITY_VERIFIED_HEALTHY_CYCLE'
+                  : 'OUTLOOK_IDENTITY_VERIFIED_HEALTHY_CYCLE',
+            })
+          : 0;
+      return {
+        accountId: account.id,
+        status,
+        ...counts,
+        resolvedAccountCycleErrors,
+        details,
+      };
     } catch (error) {
       const unaggregatedErrors = Number(error?.[UNAGGREGATED_ERROR_COUNT] || 0);
       const hadOtherErrors = counts.errors + unaggregatedErrors > 0;
@@ -358,6 +446,18 @@ class ArchiveSyncEngine {
     } = {}
   ) {
     const provider = this.providerFactory(account);
+    let identityGuard;
+    try {
+      // Direct reconciliation has the same zero-write identity boundary as a
+      // scheduled cycle. Do not create an audit run for an unproved account.
+      identityGuard = await this.assertAccountIdentity(account, provider);
+    } catch (error) {
+      return identityFailureResult(account, error);
+    }
+    this.database.interruptRunningRuns('worker_recovered_after_interruption', {
+      accountIds: [account.id],
+    });
+    this.database.upsertAccount(account);
     const runId = this.database.beginRun(account.id, 'reconciliation');
     const providerIds = new Set();
     const counts = { discovered: 0, archived: 0, errors: 0 };
@@ -441,6 +541,10 @@ class ArchiveSyncEngine {
         differences,
       };
       this.database.finishRun(runId, status, counts, details);
+      let resolvedReconciliationErrors = {
+        reconciliations: 0,
+        messageScoped: 0,
+      };
       if (status === 'completed') {
         this.database.setCursor(account.id, 'backfill', null, {
           complete: true,
@@ -453,8 +557,23 @@ class ArchiveSyncEngine {
           localEligible,
           differences,
         });
+        resolvedReconciliationErrors =
+          this.database.resolveReconciledIngestionErrors({
+            accountId: account.id,
+            successfulRunId: runId,
+            resolutionCode:
+              account.provider === 'gmail' && identityGuard?.identityMatch
+                ? 'GMAIL_IDENTITY_VERIFIED_FULL_RECONCILIATION'
+                : 'OUTLOOK_IDENTITY_VERIFIED_FULL_RECONCILIATION',
+          });
       }
-      return { accountId: account.id, status, ...counts, ...details };
+      return {
+        accountId: account.id,
+        status,
+        ...counts,
+        ...details,
+        resolvedReconciliationErrors,
+      };
     } catch (error) {
       const unaggregatedErrors = Number(error?.[UNAGGREGATED_ERROR_COUNT] || 0);
       const hadOtherErrors = counts.errors + unaggregatedErrors > 0;
@@ -479,7 +598,9 @@ class ArchiveSyncEngine {
 
 module.exports = {
   ArchiveSyncEngine,
+  identityFailureResult,
   isGmailRateLimit,
   metadata,
+  safeIdentityError,
   safeError,
 };

@@ -121,6 +121,7 @@ describe('Gmail archive provider', () => {
         id: 'gmail-ablative',
         provider: 'gmail',
         displayName: 'Ablative Gmail',
+        expectedIdentity: 'ablative@example.test',
         accountKey: 'personal',
       },
       env: {},
@@ -137,16 +138,311 @@ describe('Gmail archive provider', () => {
     );
   });
 
+  test('proves the logical identity case-insensitively without exposing it', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        logicalAccountId: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'ablative',
+        expectedIdentity: 'personal@example.test',
+      },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      fetchImpl: jest
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ emailAddress: 'PERSONAL@EXAMPLE.TEST' })
+        ),
+    });
+
+    await expect(provider.auditIdentity()).resolves.toEqual(
+      expect.objectContaining({
+        logicalAccountId: 'gmail-personal',
+        credentialSlot: 'ablative',
+        expectedIdentityConfigured: true,
+        identityMatch: true,
+        errorCode: null,
+      })
+    );
+    expect(Object.keys(await provider.auditIdentity()).sort()).toEqual(
+      [
+        'credentialSlot',
+        'errorCode',
+        'expectedIdentityConfigured',
+        'identityMatch',
+        'logicalAccountId',
+        'verifiedAt',
+      ].sort()
+    );
+  });
+
+  test('fails closed before a provider request when logical identity is missing or wrong', async () => {
+    const missingRequest = jest.fn();
+    const missingToken = jest.fn().mockResolvedValue('fixture-access-token');
+    const missing = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'ablative',
+        expectedIdentity: '',
+      },
+      httpClient: { request: missingRequest },
+      tokenProvider: missingToken,
+    });
+    await expect(missing.listRecent()).rejects.toEqual(
+      expect.objectContaining({ code: 'GMAIL_IDENTITY_CONFIG_MISSING' })
+    );
+    expect(missingToken).not.toHaveBeenCalled();
+    expect(missingRequest).not.toHaveBeenCalled();
+
+    const wrongRequest = jest.fn();
+    const wrong = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'ablative',
+        expectedIdentity: 'expected@example.test',
+      },
+      httpClient: { request: wrongRequest },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      fetchImpl: jest
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ emailAddress: 'different@example.test' })
+        ),
+    });
+    await expect(wrong.listRecent()).rejects.toEqual(
+      expect.objectContaining({
+        code: 'GMAIL_IDENTITY_MISMATCH',
+        retryable: false,
+      })
+    );
+    expect(wrongRequest).not.toHaveBeenCalled();
+    const safe = await wrong.auditIdentity();
+    expect(JSON.stringify(safe)).not.toContain('expected@example.test');
+    expect(JSON.stringify(safe)).not.toContain('different@example.test');
+  });
+
+  test('reports provider profile failure with a safe code', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'ablative',
+        expectedIdentity: 'personal@example.test',
+      },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      fetchImpl: jest.fn().mockResolvedValue(jsonResponse({}, 503)),
+    });
+
+    await expect(provider.auditIdentity()).resolves.toEqual(
+      expect.objectContaining({
+        identityMatch: false,
+        errorCode: 'GMAIL_IDENTITY_PROFILE_FAILED',
+      })
+    );
+  });
+
+  test('does not replace a refreshed token after an identity mismatch', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'personal',
+        expectedIdentity: 'personal@example.test',
+      },
+      env: {
+        GMAIL_PERSONAL_CLIENT_ID: 'client',
+        GMAIL_PERSONAL_CLIENT_SECRET: 'secret',
+      },
+      fetchImpl: jest
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            access_token: 'new-access-token',
+            expires_in: 3600,
+            token_type: 'Bearer',
+          })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ emailAddress: 'different@example.test' })
+        ),
+    });
+    provider.readToken = jest
+      .fn()
+      .mockResolvedValue({ refresh_token: 'refresh-token' });
+    provider.writeToken = jest.fn();
+
+    await expect(provider.getAccessToken(true)).rejects.toEqual(
+      expect.objectContaining({ code: 'GMAIL_IDENTITY_MISMATCH' })
+    );
+    expect(provider.writeToken).not.toHaveBeenCalled();
+  });
+
+  test('refreshes a cached token once after profile 401 and proves it before saving', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'personal',
+        expectedIdentity: 'personal@example.test',
+      },
+      env: {
+        GMAIL_PERSONAL_CLIENT_ID: 'client',
+        GMAIL_PERSONAL_CLIENT_SECRET: 'secret',
+      },
+      fetchImpl: jest
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({}, 401))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            access_token: 'replacement-access-token',
+            expires_in: 3600,
+            token_type: 'Bearer',
+          })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ emailAddress: 'personal@example.test' })
+        ),
+    });
+    provider.readToken = jest.fn().mockResolvedValue({
+      access_token: 'stale-cached-token',
+      refresh_token: 'refresh-token',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    });
+    provider.writeToken = jest.fn();
+
+    await expect(provider.getAccessToken()).resolves.toBe(
+      'replacement-access-token'
+    );
+    expect(provider.fetchImpl).toHaveBeenCalledTimes(3);
+    expect(provider.writeToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('bounds a hanging profile check and returns only a safe failure code', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        credentialSlot: 'ablative',
+        expectedIdentity: 'personal@example.test',
+      },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      profileTimeoutMs: 5,
+      fetchImpl: jest.fn(
+        (_url, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => {
+              const error = new Error('private network detail');
+              error.name = 'AbortError';
+              reject(error);
+            });
+          })
+      ),
+    });
+
+    await expect(provider.auditIdentity()).resolves.toEqual(
+      expect.objectContaining({
+        identityMatch: false,
+        errorCode: 'GMAIL_IDENTITY_PROFILE_FAILED',
+      })
+    );
+    expect(JSON.stringify(await provider.auditIdentity())).not.toContain(
+      'private network detail'
+    );
+  });
+
+  test('probes a credential slot in memory without requiring or persisting an expected identity', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-commissioning',
+        logicalAccountId: 'gmail-commissioning',
+        provider: 'gmail',
+        credentialSlot: 'personal',
+        expectedIdentity: '',
+      },
+      env: {},
+    });
+    provider.readToken = jest.fn().mockResolvedValue({
+      refresh_token: 'fixture-refresh-token',
+      expires_at: 0,
+    });
+    provider.refreshTokenInMemory = jest.fn().mockResolvedValue({
+      access_token: 'fixture-access-token',
+      refresh_token: 'fixture-refresh-token',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    });
+    provider.fetchProfileIdentity = jest
+      .fn()
+      .mockResolvedValue('private@example.test');
+    provider.writeToken = jest.fn();
+
+    await expect(
+      provider.probeIdentityCandidateForCommissioning()
+    ).resolves.toEqual({
+      credentialSlot: 'personal',
+      identity: 'private@example.test',
+      refreshedInMemory: true,
+    });
+    expect(provider.writeToken).not.toHaveBeenCalled();
+  });
+
+  test('records a safe actionable reason when Google rejects a refresh token', async () => {
+    const provider = new GmailArchiveProvider({
+      account: {
+        id: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+        expectedIdentity: 'personal@example.test',
+        accountKey: 'personal',
+      },
+      env: {
+        GMAIL_PERSONAL_CLIENT_ID: 'client',
+        GMAIL_PERSONAL_CLIENT_SECRET: 'secret',
+        GMAIL_PERSONAL_REFRESH_TOKEN: 'refresh',
+      },
+      fetchImpl: jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: jest.fn().mockResolvedValue({
+          error: 'invalid_grant',
+          error_description: 'private provider detail',
+        }),
+      }),
+    });
+    provider.readToken = jest.fn().mockResolvedValue({});
+
+    await expect(provider.getAccessToken(true)).rejects.toEqual(
+      expect.objectContaining({
+        code: 'GMAIL_AUTH',
+        message: expect.stringContaining('expired or was revoked'),
+      })
+    );
+    await expect(provider.getAccessToken(true)).rejects.not.toThrow(
+      'private provider detail'
+    );
+  });
+
   function providerWithHttp(request) {
     return new GmailArchiveProvider({
       account: {
         id: 'gmail-personal',
         provider: 'gmail',
         displayName: 'Personal Gmail',
+        expectedIdentity: 'personal@example.test',
         accountKey: 'personal',
       },
       env: {},
       httpClient: { request },
+      identityVerifier: jest.fn().mockResolvedValue(true),
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
     });
   }
 
@@ -288,6 +584,144 @@ describe('Gmail archive provider', () => {
 });
 
 describe('Outlook archive provider', () => {
+  test('proves delegated Graph identity case-insensitively without exposing it', async () => {
+    const provider = new OutlookArchiveProvider({
+      account: {
+        id: 'vitasci-outlook',
+        logicalAccountId: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+        credentialSlot: 'default-delegated',
+        expectedIdentity: 'owner@example.test',
+      },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      fetchImpl: jest.fn().mockResolvedValue(
+        jsonResponse({
+          mail: null,
+          userPrincipalName: 'OWNER@EXAMPLE.TEST',
+        })
+      ),
+    });
+
+    const status = await provider.auditIdentity();
+    expect(status).toEqual({
+      logicalAccountId: 'vitasci-outlook',
+      credentialSlot: 'default-delegated',
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: expect.any(String),
+      errorCode: null,
+    });
+    expect(JSON.stringify(status)).not.toContain('owner@example.test');
+  });
+
+  test('fails closed before Outlook archive requests when identity is missing or wrong', async () => {
+    const missingRequest = jest.fn();
+    const missingToken = jest.fn().mockResolvedValue('fixture-access-token');
+    const missing = new OutlookArchiveProvider({
+      account: {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+        expectedIdentity: '',
+      },
+      httpClient: { request: missingRequest },
+      tokenProvider: missingToken,
+    });
+    await expect(missing.listRecent()).rejects.toEqual(
+      expect.objectContaining({ code: 'OUTLOOK_IDENTITY_CONFIG_MISSING' })
+    );
+    expect(missingToken).not.toHaveBeenCalled();
+    expect(missingRequest).not.toHaveBeenCalled();
+
+    const wrongRequest = jest.fn();
+    const wrong = new OutlookArchiveProvider({
+      account: {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+        expectedIdentity: 'expected@example.test',
+      },
+      httpClient: { request: wrongRequest },
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      fetchImpl: jest.fn().mockResolvedValue(
+        jsonResponse({
+          mail: 'different@example.test',
+          userPrincipalName: 'different@example.test',
+        })
+      ),
+    });
+    await expect(wrong.listRecent()).rejects.toEqual(
+      expect.objectContaining({
+        code: 'OUTLOOK_IDENTITY_MISMATCH',
+        retryable: false,
+      })
+    );
+    expect(wrongRequest).not.toHaveBeenCalled();
+    const safe = await wrong.auditIdentity();
+    expect(JSON.stringify(safe)).not.toContain('expected@example.test');
+    expect(JSON.stringify(safe)).not.toContain('different@example.test');
+  });
+
+  test('keeps identity-audit refresh in memory and persists only a proved runtime token', async () => {
+    const provider = new OutlookArchiveProvider({
+      account: {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+        expectedIdentity: 'owner@example.test',
+      },
+      identityVerifier: jest.fn().mockResolvedValue(true),
+    });
+    provider.readDelegatedToken = jest.fn().mockResolvedValue({
+      refresh_token: 'fixture-refresh-token',
+      expires_at: 0,
+    });
+    provider.refreshDelegatedToken = jest.fn().mockResolvedValue({
+      refresh_token: 'fixture-refresh-token',
+      access_token: 'fixture-refreshed-access-token',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    });
+    provider.writeDelegatedToken = jest.fn();
+
+    await expect(provider.auditIdentity()).resolves.toEqual(
+      expect.objectContaining({ identityMatch: true, errorCode: null })
+    );
+    expect(provider.writeDelegatedToken).not.toHaveBeenCalled();
+
+    await expect(provider.assertArchiveIdentity()).resolves.toEqual(
+      expect.objectContaining({ identityMatch: true, errorCode: null })
+    );
+    expect(provider.writeDelegatedToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('never persists a refreshed Outlook token whose Graph identity mismatches', async () => {
+    const provider = new OutlookArchiveProvider({
+      account: {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+        expectedIdentity: 'owner@example.test',
+      },
+      identityVerifier: jest.fn().mockResolvedValue(false),
+    });
+    provider.readDelegatedToken = jest.fn().mockResolvedValue({
+      refresh_token: 'fixture-refresh-token',
+      expires_at: 0,
+    });
+    provider.refreshDelegatedToken = jest.fn().mockResolvedValue({
+      refresh_token: 'fixture-refresh-token',
+      access_token: 'wrong-refreshed-access-token',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    });
+    provider.writeDelegatedToken = jest.fn();
+
+    await expect(provider.assertArchiveIdentity()).rejects.toEqual(
+      expect.objectContaining({ code: 'OUTLOOK_IDENTITY_MISMATCH' })
+    );
+    expect(provider.writeDelegatedToken).not.toHaveBeenCalled();
+  });
+
   test('skips consecutive empty folders during historical traversal', async () => {
     const request = jest.fn(async (path) => {
       if (path.includes('/mailFolders/empty/messages?')) return { value: [] };
@@ -301,9 +735,11 @@ describe('Outlook archive provider', () => {
         id: 'vitasci-outlook',
         provider: 'outlook',
         displayName: 'VitaSci Outlook',
+        expectedIdentity: 'owner@example.test',
       },
       httpClient: { request },
-      tokenProvider: jest.fn(),
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      identityVerifier: jest.fn().mockResolvedValue(true),
     });
     provider.folders = new Map([
       [
@@ -387,9 +823,11 @@ describe('Outlook archive provider', () => {
         id: 'vitasci-outlook',
         provider: 'outlook',
         displayName: 'VitaSci Outlook',
+        expectedIdentity: 'owner@example.test',
       },
       httpClient: { request },
-      tokenProvider: jest.fn(),
+      tokenProvider: jest.fn().mockResolvedValue('fixture-access-token'),
+      identityVerifier: jest.fn().mockResolvedValue(true),
     });
     provider.folders = new Map([
       ['inbox-id', { id: 'inbox-id', displayName: 'Inbox', excluded: false }],

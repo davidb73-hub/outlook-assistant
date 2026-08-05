@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { MIGRATIONS } = require('./migrations');
+const { FTS_ROW_DELETE_SQL, messageKey, scanFtsIndex } = require('./fts-index');
 
 function nowIso() {
   return new Date().toISOString();
@@ -51,6 +52,7 @@ class ArchiveDatabase {
     this.db.pragma('synchronous = FULL');
     this.db.pragma('busy_timeout = 5000');
     this.migrate();
+    this.ftsRowsByMessageId = null;
   }
 
   migrate() {
@@ -84,16 +86,18 @@ class ArchiveDatabase {
   upsertAccount(account) {
     assertAccount(account);
     const timestamp = nowIso();
-    this.db
+    return this.db
       .prepare(
         `INSERT INTO accounts(id, provider, display_name, enabled, created_at, updated_at)
          VALUES (@id, @provider, @displayName, 1, @timestamp, @timestamp)
          ON CONFLICT(id) DO UPDATE SET
            provider = excluded.provider,
            display_name = excluded.display_name,
-           updated_at = excluded.updated_at`
+           updated_at = excluded.updated_at
+         WHERE accounts.provider IS NOT excluded.provider
+            OR accounts.display_name IS NOT excluded.display_name`
       )
-      .run({ ...account, timestamp });
+      .run({ ...account, timestamp }).changes;
   }
 
   upsertFolder(accountId, folder) {
@@ -149,7 +153,7 @@ class ArchiveDatabase {
         ? 'archived_pending_attachments'
         : 'archived_complete';
 
-    return this.db.transaction(() => {
+    const stage = this.db.transaction(() => {
       if (rawBlob) this.registerBlob(rawBlob);
 
       const result = this.db
@@ -228,7 +232,15 @@ class ArchiveDatabase {
       this.refreshFts(messageId, accountId, message);
 
       return this.getMessageById(messageId);
-    })();
+    });
+    try {
+      return stage();
+    } catch (error) {
+      // refreshFts maintains an in-memory rowid map. A surrounding transaction
+      // rollback invalidates any cache update made before the failure.
+      this.ftsRowsByMessageId = null;
+      throw error;
+    }
   }
 
   replaceRecipients(messageId, recipients) {
@@ -300,14 +312,29 @@ class ArchiveDatabase {
   }
 
   refreshFts(messageId, accountId, message) {
-    this.db
-      .prepare('DELETE FROM messages_fts WHERE message_id = ?')
-      .run(messageId);
+    if (!this.ftsRowsByMessageId) {
+      const index = scanFtsIndex(this.db);
+      if (index.duplicateRows !== 0) {
+        throw new Error('FTS message index contains duplicate rows');
+      }
+      this.ftsRowsByMessageId = index.rowsByMessageId;
+    }
+    const key = messageKey(messageId);
+    const existing = this.ftsRowsByMessageId.get(key);
+    if (
+      existing &&
+      this.db.prepare(FTS_ROW_DELETE_SQL).run(existing.fts_rowid, messageId)
+        .changes !== 1
+    ) {
+      this.ftsRowsByMessageId = null;
+      throw new Error('FTS message index changed during refresh');
+    }
+    this.ftsRowsByMessageId.delete(key);
     const participants = (message.recipients || [])
       .flatMap((recipient) => [recipient.displayName, recipient.address])
       .filter(Boolean)
       .join(' ');
-    this.db
+    const inserted = this.db
       .prepare(
         `INSERT INTO messages_fts(message_id, account_id, subject, body, participants)
          VALUES (?, ?, ?, ?, ?)`
@@ -319,6 +346,11 @@ class ArchiveDatabase {
         [message.bodyText, message.bodyPreview].filter(Boolean).join('\n'),
         participants
       );
+    this.ftsRowsByMessageId.set(key, {
+      fts_rowid: inserted.lastInsertRowid,
+      message_id: messageId,
+      account_id: accountId,
+    });
   }
 
   completeAttachment(messageId, providerAttachmentId, blob) {
@@ -487,6 +519,17 @@ class ArchiveDatabase {
   }
 
   enqueueDelivery(messageId, destinations, packageRoot = null) {
+    const enabled = this.db
+      .prepare(
+        `SELECT a.enabled
+         FROM messages m
+         JOIN accounts a ON a.id = m.account_id
+         WHERE m.id = ?`
+      )
+      .get(messageId)?.enabled;
+    if (enabled !== 1) {
+      throw new Error('DELIVERY_ACCOUNT_DISABLED');
+    }
     const timestamp = nowIso();
     const insert = this.db.prepare(
       `INSERT INTO delivery_jobs(message_id, destination, package_root, created_at, updated_at)
@@ -515,19 +558,34 @@ class ArchiveDatabase {
     if (status) {
       return this.db
         .prepare(
-          'SELECT * FROM delivery_jobs WHERE status = ? ORDER BY updated_at'
+          `SELECT dj.*
+           FROM delivery_jobs dj
+           JOIN messages m ON m.id = dj.message_id
+           JOIN accounts a ON a.id = m.account_id AND a.enabled = 1
+           WHERE dj.status = ?
+           ORDER BY dj.updated_at`
         )
         .all(status);
     }
     return this.db
-      .prepare('SELECT * FROM delivery_jobs ORDER BY updated_at')
+      .prepare(
+        `SELECT dj.*
+         FROM delivery_jobs dj
+         JOIN messages m ON m.id = dj.message_id
+         JOIN accounts a ON a.id = m.account_id AND a.enabled = 1
+         ORDER BY dj.updated_at`
+      )
       .all();
   }
 
   listMessagesArchivedSince(timestamp) {
     return this.db
       .prepare(
-        'SELECT id FROM messages WHERE first_archived_at >= ? ORDER BY id'
+        `SELECT m.id
+         FROM messages m
+         JOIN accounts a ON a.id = m.account_id AND a.enabled = 1
+         WHERE m.first_archived_at >= ?
+         ORDER BY m.id`
       )
       .all(timestamp)
       .map((row) => this.getMessageById(row.id));
@@ -544,6 +602,9 @@ class ArchiveDatabase {
       .prepare(
         `SELECT a.id, a.message_id, a.provider_attachment_id, a.file_name, a.blob_hash
            FROM attachments a
+           JOIN messages m ON m.id = a.message_id
+           JOIN accounts account
+             ON account.id = m.account_id AND account.enabled = 1
            LEFT JOIN attachment_security s ON s.attachment_id = a.id
           WHERE a.archive_state = 'complete'
             AND a.blob_hash IS NOT NULL
@@ -556,6 +617,21 @@ class ArchiveDatabase {
   }
 
   proposeDeliveries(messageId, triage) {
+    const enabled = this.db
+      .prepare(
+        `SELECT account.enabled
+         FROM messages m
+         JOIN accounts account ON account.id = m.account_id
+         WHERE m.id = ?`
+      )
+      .get(messageId)?.enabled;
+    if (enabled !== 1) {
+      return {
+        status: 'review',
+        reason: 'account-disabled',
+        jobs: [],
+      };
+    }
     const unsafe = this.db
       .prepare(
         `SELECT COUNT(*) AS count FROM attachments a
@@ -693,7 +769,13 @@ class ArchiveDatabase {
 
   search(
     query,
-    { accountId = null, limit = 50, after = null, before = null } = {}
+    {
+      accountId = null,
+      limit = 50,
+      after = null,
+      before = null,
+      includeDisabled = false,
+    } = {}
   ) {
     const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
     const afterIso = after ? this.normalizedSearchDate(after, 'after') : null;
@@ -708,13 +790,16 @@ class ArchiveDatabase {
                   m.received_at, m.sent_at, m.archive_state, m.current_eligible,
                   NULL AS rank
            FROM messages m
-           WHERE (? IS NULL OR m.account_id = ?)
+           JOIN accounts a ON a.id = m.account_id
+           WHERE (? = 1 OR a.enabled = 1)
+             AND (? IS NULL OR m.account_id = ?)
              AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) >= ?)
              AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) < ?)
            ORDER BY COALESCE(m.received_at, m.sent_at) DESC
            LIMIT ?`
         )
         .all(
+          includeDisabled ? 1 : 0,
           accountId,
           accountId,
           afterIso,
@@ -731,7 +816,9 @@ class ArchiveDatabase {
                 bm25(messages_fts) AS rank
          FROM messages_fts
          JOIN messages m ON m.id = messages_fts.message_id
+         JOIN accounts a ON a.id = m.account_id
          WHERE messages_fts MATCH ?
+           AND (? = 1 OR a.enabled = 1)
            AND (? IS NULL OR m.account_id = ?)
            AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) >= ?)
            AND (? IS NULL OR COALESCE(m.received_at, m.sent_at) < ?)
@@ -740,6 +827,7 @@ class ArchiveDatabase {
       )
       .all(
         query,
+        includeDisabled ? 1 : 0,
         accountId,
         accountId,
         afterIso,
@@ -821,15 +909,26 @@ class ArchiveDatabase {
       );
   }
 
-  interruptRunningRuns(reason = 'worker_recovered_after_interruption') {
+  interruptRunningRuns(
+    reason = 'worker_recovered_after_interruption',
+    { accountIds = null } = {}
+  ) {
+    const scopedAccountIds =
+      accountIds === null
+        ? null
+        : [...new Set(accountIds.filter((accountId) => accountId))];
+    if (scopedAccountIds?.length === 0) return 0;
+    const accountScope = scopedAccountIds
+      ? ` AND account_id IN (${scopedAccountIds.map(() => '?').join(',')})`
+      : '';
     return this.db
       .prepare(
         `UPDATE ingestion_runs
          SET finished_at = ?, status = 'interrupted',
              details_json = COALESCE(details_json, ?)
-         WHERE status = 'running'`
+         WHERE status = 'running'${accountScope}`
       )
-      .run(nowIso(), json({ reason })).changes;
+      .run(nowIso(), json({ reason }), ...(scopedAccountIds || [])).changes;
   }
 
   recordIngestionError({
@@ -860,14 +959,165 @@ class ArchiveDatabase {
       );
   }
 
-  resolveIngestionErrors(accountId, providerMessageId) {
-    this.db
+  resolveIngestionErrors(
+    accountId,
+    providerMessageId,
+    { runId = null, resolutionCode = 'MESSAGE_ARCHIVED_COMPLETE' } = {}
+  ) {
+    return this.db
       .prepare(
         `UPDATE ingestion_errors
-         SET resolved_at = ?
-         WHERE account_id = ? AND provider_message_id = ? AND resolved_at IS NULL`
+         SET resolved_at = ?, resolution_run_id = ?, resolution_code = ?
+         WHERE account_id = ?
+           AND provider_message_id = ?
+           AND stage IN ('message', 'message_fetch', 'attachment', 'tombstone')
+           AND resolved_at IS NULL`
       )
-      .run(nowIso(), accountId, providerMessageId);
+      .run(nowIso(), runId, resolutionCode, accountId, providerMessageId)
+      .changes;
+  }
+
+  resolveAccountCycleErrors({ accountId, successfulRunId, resolutionCode }) {
+    if (
+      ![
+        'GMAIL_IDENTITY_VERIFIED_HEALTHY_CYCLE',
+        'OUTLOOK_IDENTITY_VERIFIED_HEALTHY_CYCLE',
+        'PROVIDER_HEALTHY_CYCLE',
+      ].includes(resolutionCode)
+    ) {
+      throw new Error(
+        'A deterministic account-cycle resolution code is required'
+      );
+    }
+    const run = this.db
+      .prepare(
+        `SELECT id, account_id, run_type, status, error_count, finished_at
+         FROM ingestion_runs WHERE id = ?`
+      )
+      .get(successfulRunId);
+    if (
+      !run ||
+      run.account_id !== accountId ||
+      run.run_type !== 'scheduled_cycle' ||
+      run.status !== 'completed' ||
+      run.error_count !== 0 ||
+      !run.finished_at
+    ) {
+      throw new Error(
+        'Account-cycle errors require a completed zero-error run for the same account'
+      );
+    }
+    return this.db
+      .prepare(
+        `UPDATE ingestion_errors
+         SET resolved_at = ?, resolution_run_id = ?, resolution_code = ?
+         WHERE account_id = ?
+           AND provider_message_id IS NULL
+           AND stage = 'account_cycle'
+           AND resolved_at IS NULL
+           AND created_at <= ?`
+      )
+      .run(
+        nowIso(),
+        successfulRunId,
+        resolutionCode,
+        accountId,
+        run.finished_at
+      ).changes;
+  }
+
+  resolveReconciledIngestionErrors({
+    accountId,
+    successfulRunId,
+    resolutionCode,
+  }) {
+    if (
+      ![
+        'GMAIL_IDENTITY_VERIFIED_FULL_RECONCILIATION',
+        'OUTLOOK_IDENTITY_VERIFIED_FULL_RECONCILIATION',
+        'PROVIDER_FULL_RECONCILIATION',
+      ].includes(resolutionCode)
+    ) {
+      throw new Error(
+        'A deterministic reconciliation resolution code is required'
+      );
+    }
+    const run = this.db
+      .prepare(
+        `SELECT id, account_id, run_type, status, error_count, finished_at,
+                details_json
+         FROM ingestion_runs WHERE id = ?`
+      )
+      .get(successfulRunId);
+    const details = (() => {
+      try {
+        return JSON.parse(run?.details_json || '{}');
+      } catch {
+        return {};
+      }
+    })();
+    if (
+      !run ||
+      run.account_id !== accountId ||
+      run.run_type !== 'reconciliation' ||
+      run.status !== 'completed' ||
+      run.error_count !== 0 ||
+      !run.finished_at ||
+      details.differences !== 0
+    ) {
+      throw new Error(
+        'Reconciliation errors require a zero-difference completed run for the same account'
+      );
+    }
+    return this.db.transaction(() => {
+      const reconciliations = this.db
+        .prepare(
+          `UPDATE ingestion_errors
+           SET resolved_at = ?, resolution_run_id = ?, resolution_code = ?
+           WHERE account_id = ?
+             AND provider_message_id IS NULL
+             AND stage = 'reconciliation'
+             AND resolved_at IS NULL
+             AND created_at <= ?`
+        )
+        .run(
+          nowIso(),
+          successfulRunId,
+          resolutionCode,
+          accountId,
+          run.finished_at
+        ).changes;
+      const messageScoped = this.db
+        .prepare(
+          `UPDATE ingestion_errors
+           SET resolved_at = ?, resolution_run_id = ?, resolution_code = ?
+           WHERE account_id = ?
+             AND provider_message_id IS NOT NULL
+             AND stage IN ('message', 'message_fetch', 'attachment', 'tombstone')
+             AND resolved_at IS NULL
+             AND created_at <= ?
+             AND EXISTS (
+               SELECT 1 FROM messages
+               WHERE messages.account_id = ingestion_errors.account_id
+                 AND messages.provider_message_id = ingestion_errors.provider_message_id
+                 AND (
+                   messages.archive_state = 'archived_complete'
+                   OR (
+                     messages.current_eligible = 0
+                     AND messages.deleted_remote = 1
+                   )
+                 )
+             )`
+        )
+        .run(
+          nowIso(),
+          successfulRunId,
+          resolutionCode,
+          accountId,
+          run.finished_at
+        ).changes;
+      return { reconciliations, messageScoped };
+    })();
   }
 
   listProviderMessageIds(accountId, { currentEligible = null } = {}) {
@@ -897,28 +1147,35 @@ class ArchiveDatabase {
       .all(accountId, safeLimit);
   }
 
-  recentRuns(limit = 20) {
+  recentRuns(limit = 20, { includeDisabled = false } = {}) {
     const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 200));
     return this.db
       .prepare(
-        `SELECT id, account_id, run_type, started_at, finished_at, status,
-                discovered_count, archived_count, error_count, details_json
-         FROM ingestion_runs ORDER BY id DESC LIMIT ?`
+        `SELECT ir.id, ir.account_id, ir.run_type, ir.started_at,
+                ir.finished_at, ir.status, ir.discovered_count,
+                ir.archived_count, ir.error_count, ir.details_json
+         FROM ingestion_runs ir
+         LEFT JOIN accounts a ON a.id = ir.account_id
+         WHERE ? = 1 OR ir.account_id IS NULL OR a.enabled = 1
+         ORDER BY ir.id DESC LIMIT ?`
       )
-      .all(safeLimit);
+      .all(includeDisabled ? 1 : 0, safeLimit);
   }
 
-  unresolvedErrors(limit = 50) {
+  unresolvedErrors(limit = 50, { includeDisabled = false } = {}) {
     const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
     return this.db
       .prepare(
-        `SELECT id, run_id, account_id, provider_message_id, stage,
-                error_code, error_message, retryable, created_at
-         FROM ingestion_errors
-         WHERE resolved_at IS NULL
-         ORDER BY id DESC LIMIT ?`
+        `SELECT ie.id, ie.run_id, ie.account_id, ie.provider_message_id,
+                ie.stage, ie.error_code, ie.error_message, ie.retryable,
+                ie.created_at
+         FROM ingestion_errors ie
+         LEFT JOIN accounts a ON a.id = ie.account_id
+         WHERE ie.resolved_at IS NULL
+           AND (? = 1 OR ie.account_id IS NULL OR a.enabled = 1)
+         ORDER BY ie.id DESC LIMIT ?`
       )
-      .all(safeLimit);
+      .all(includeDisabled ? 1 : 0, safeLimit);
   }
 
   listBlobs() {
@@ -931,6 +1188,45 @@ class ArchiveDatabase {
   }
 
   status() {
+    // The CLI serialises this object directly. Keep the richer operational
+    // methods available to deterministic internals, but never place provider
+    // message IDs, exception text, or arbitrary details JSON in routine status
+    // output.
+    const recentRuns = this.recentRuns(10).map(
+      ({
+        account_id,
+        run_type,
+        started_at,
+        finished_at,
+        status,
+        discovered_count,
+        archived_count,
+        error_count,
+      }) => ({
+        account_id,
+        run_type,
+        started_at,
+        finished_at,
+        status,
+        discovered_count,
+        archived_count,
+        error_count,
+      })
+    );
+    const unresolvedErrors = this.db
+      .prepare(
+        `SELECT ie.account_id, ie.retryable,
+                COUNT(*) AS error_count,
+                MIN(ie.created_at) AS oldest_at,
+                MAX(ie.created_at) AS newest_at
+         FROM ingestion_errors ie
+         LEFT JOIN accounts a ON a.id = ie.account_id
+         WHERE ie.resolved_at IS NULL
+           AND (ie.account_id IS NULL OR a.enabled = 1)
+         GROUP BY ie.account_id, ie.retryable
+         ORDER BY ie.account_id, ie.retryable`
+      )
+      .all();
     return {
       integrity: this.db.pragma('integrity_check', { simple: true }),
       accounts: this.db
@@ -942,12 +1238,23 @@ class ArchiveDatabase {
                   COALESCE(SUM(CASE WHEN m.deleted_remote = 1 THEN 1 ELSE 0 END), 0) AS tombstone_count
            FROM accounts a
            LEFT JOIN messages m ON m.account_id = a.id
+           WHERE a.enabled = 1
            GROUP BY a.id
            ORDER BY a.id`
         )
         .all(),
-      recentRuns: this.recentRuns(10),
-      unresolvedErrors: this.unresolvedErrors(20),
+      disabledAccounts: this.db
+        .prepare(
+          `SELECT a.id, a.provider, COUNT(m.id) AS message_count
+           FROM accounts a
+           LEFT JOIN messages m ON m.account_id = a.id
+           WHERE a.enabled = 0
+           GROUP BY a.id
+           ORDER BY a.id`
+        )
+        .all(),
+      recentRuns,
+      unresolvedErrors,
     };
   }
 

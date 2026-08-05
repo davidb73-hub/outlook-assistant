@@ -6,6 +6,8 @@ const { buildConfig } = require('./config');
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+const PROFILE_ENDPOINT =
+  'https://gmail.googleapis.com/gmail/v1/users/me/profile';
 const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 
 async function main() {
@@ -15,6 +17,11 @@ async function main() {
   if (!config) {
     throw new Error(
       `Unknown Gmail account '${accountKey}'. Add it to LOCAL_TRIAGE_GMAIL_ACCOUNTS.`
+    );
+  }
+  if (!config.expectedEmail) {
+    throw new Error(
+      `Set GMAIL_${accountKey.toUpperCase()}_EXPECTED_EMAIL before authorising this account. The token will not be saved without an identity check.`
     );
   }
   if (!config.clientId || !config.clientSecret) {
@@ -31,21 +38,23 @@ async function main() {
 
   const code = await waitForCode(config.redirectUri);
   const token = await exchangeCode(config, code);
+  await verifyExpectedIdentity(config, token);
   await writeToken(config.tokenPath, token);
   console.log(
-    `Gmail token saved for ${config.accountLabel}: ${config.tokenPath}`
+    `Gmail token saved for credential slot ${accountKey}: ${config.tokenPath}`
   );
 }
 
 function buildAuthUrl(config) {
-  return `${AUTH_ENDPOINT}?${new URLSearchParams({
+  const query = {
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
     response_type: 'code',
     scope: SCOPE,
     access_type: 'offline',
-    prompt: 'consent',
-  })}`;
+    prompt: 'select_account consent',
+  };
+  return `${AUTH_ENDPOINT}?${new URLSearchParams(query)}`;
 }
 
 function waitForCode(redirectUri) {
@@ -116,6 +125,34 @@ async function exchangeCode(config, code) {
   };
 }
 
+async function verifyExpectedIdentity(
+  config,
+  token,
+  fetchImpl = globalThis.fetch
+) {
+  const response = await fetchImpl(PROFILE_ENDPOINT, {
+    headers: { authorization: `Bearer ${token.access_token}` },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Gmail profile verification failed (HTTP ${response.status}); no token was saved.`
+    );
+  }
+  const profile = await response.json();
+  const actual = String(profile.emailAddress || '')
+    .trim()
+    .toLowerCase();
+  const expected = String(config.expectedEmail || '')
+    .trim()
+    .toLowerCase();
+  if (!expected || actual !== expected) {
+    throw new Error(
+      'GMAIL_IDENTITY_MISMATCH: the selected Gmail account does not match the configured credential slot; no token was saved.'
+    );
+  }
+  return actual;
+}
+
 async function writeToken(tokenPath, token) {
   if (!token.refresh_token) {
     throw new Error(
@@ -123,7 +160,17 @@ async function writeToken(tokenPath, token) {
     );
   }
   await fs.mkdir(path.dirname(tokenPath), { recursive: true });
-  await fs.writeFile(tokenPath, `${JSON.stringify(token, null, 2)}\n`);
+  const temporary = `${tokenPath}.auth-tmp`;
+  try {
+    await fs.writeFile(temporary, `${JSON.stringify(token, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    await fs.rename(temporary, tokenPath);
+    await fs.chmod(tokenPath, 0o600);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 if (require.main === module) {
@@ -136,4 +183,5 @@ if (require.main === module) {
 module.exports = {
   buildAuthUrl,
   exchangeCode,
+  verifyExpectedIdentity,
 };

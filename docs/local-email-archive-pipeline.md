@@ -1,6 +1,6 @@
 # Local Email Archive Pipeline
 
-**Status:** Operational archive; automated gates pass, owner-controlled and elapsed acceptance tests remain  
+**Status:** Remediation pause; scheduler disabled and Phase 1 not accepted
 **Decision date:** 2026-07-18  
 **Owner:** David Basseal
 
@@ -71,6 +71,11 @@ The LLM does not retrieve email.
 
 - Outlook retrieval is performed by deterministic Node.js code calling Microsoft Graph with the existing Outlook authentication components.
 - Gmail retrieval is performed by deterministic Node.js code calling the Gmail API with read-only OAuth credentials.
+- Before any folder, message, attachment, or cursor operation, each connector
+  retrieves the authenticated provider profile and compares it with an explicit
+  semantic archive identity. Missing or mismatched identity fails that account
+  closed without advancing its checkpoint. Credential filenames and historical
+  slot labels are never identity proof.
 - Archive code validates, hashes, deduplicates, and writes the result to SQLite and managed filesystem storage.
 - Local LLMs receive only already-archived records for later interpretation.
 
@@ -162,7 +167,10 @@ and 20,149 attachment records. After the verified Gmail identity correction and
 authorized test-mail ingestion, the live archive contains 27,407 messages and
 20,213 attachment records with zero provider-to-archive differences. The
 following estimates remain useful for a fresh installation but are not service
-guarantees:
+guarantees. These historical figures are not current Phase 1 acceptance
+evidence: a later Gmail wrong-binding interval produced wrong-partition copies,
+and the 2 August scheduler remains disabled pending targeted repair and fresh
+reconciliation:
 
 - VitaSci Outlook: hours, depending on history and attachments.
 - Ablative Gmail: hours to possibly a day.
@@ -194,15 +202,16 @@ batch are configurable with
 - Keep routine logs free of email bodies.
 - Use transactionally consistent SQLite snapshots for backup.
 - Send encrypted, deduplicated backups to VitaSci OneDrive using Restic. The
-  existing OneDrive desktop mount performs transfer, so adding Rclone would
-  duplicate the transfer layer without improving recoverability.
+  existing `onedrive-vitasci` Rclone remote performs transfer directly; do not
+  route Restic through the macOS FileProvider mount because background reads can
+  fail with `EDEADLK` (`resource deadlock avoided`).
 - Do not run the live SQLite database from a OneDrive-synchronised directory.
 - Perform scheduled integrity checks and periodic restore tests.
 
-VitaSci OneDrive mount:
+Encrypted backup repository:
 
 ```text
-/Users/davidbasseal/Library/CloudStorage/OneDrive-VitaSciConsulting
+rclone:onedrive-vitasci:Email Assistant Archive Backup
 ```
 
 ## Deferred stages
@@ -217,3 +226,10 @@ The following are explicitly later work and must not delay reliable archival:
 6. Defining additional downstream destinations.
 
 Downstream systems receive traceable copies or derived records. They do not replace the email archive.
+
+The confirmed future Command Centre destination is the live vault path
+`Assistant-Vault/30-Business/Email-Briefs`. Path agreement alone is
+insufficient: the current consumer does not issue a receipt or verify the
+package name, manifest digest, and raw hashes. Downstream execution therefore
+remains gated off until a separately approved cross-repository commissioning
+change implements and proves that contract.

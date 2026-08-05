@@ -317,6 +317,128 @@ const MIGRATIONS = [
       CREATE INDEX messages_taint_tier_idx ON messages(taint_tier);
     `,
   },
+  {
+    version: 8,
+    name: 'identity-migration-receipts',
+    // Operational identity migrations are one-shot data changes, distinct from
+    // schema versions. Their content-free receipts make a repeated invocation
+    // observable and prevent a historical account-ID swap being toggled back.
+    sql: `
+      CREATE TABLE identity_migration_receipts (
+        migration_id TEXT PRIMARY KEY,
+        precondition_digest TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        details_json TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    version: 9,
+    name: 'causal-ingestion-error-resolution',
+    // A timestamp alone cannot explain why an operational error disappeared.
+    // Link every new resolution to the successful run and deterministic cause
+    // that proved recovery; historical migration-2 resolutions remain valid
+    // with NULL provenance.
+    sql: `
+      ALTER TABLE ingestion_errors ADD COLUMN resolution_run_id INTEGER
+        REFERENCES ingestion_runs(id) ON DELETE SET NULL;
+      ALTER TABLE ingestion_errors ADD COLUMN resolution_code TEXT;
+      CREATE INDEX ingestion_errors_resolution_run_idx
+        ON ingestion_errors(resolution_run_id);
+    `,
+  },
+  {
+    version: 10,
+    name: 'gmail-partition-repair-provenance',
+    // The mixed-partition recovery is deliberately non-destructive. Wrong
+    // copies move to a disabled forensic account, while these private rows
+    // preserve exact rollback ownership and derived-state snapshots.
+    sql: `
+      CREATE TABLE identity_partition_repair_receipts (
+        migration_id TEXT PRIMARY KEY,
+        plan_digest TEXT NOT NULL,
+        precondition_digest TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        post_state_digest TEXT NOT NULL,
+        details_json TEXT NOT NULL
+      );
+
+      CREATE TABLE identity_partition_repair_messages (
+        migration_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL REFERENCES messages(id),
+        original_account_id TEXT NOT NULL,
+        target_account_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (
+          action IN ('quarantine_duplicate', 'move_proved_canonical')
+        ),
+        evidence_code TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        provider_message_id_hash TEXT NOT NULL,
+        raw_blob_hash TEXT,
+        original_fts_account_id TEXT,
+        PRIMARY KEY (migration_id, message_id)
+      );
+
+      CREATE TABLE identity_partition_repair_state (
+        migration_id TEXT NOT NULL,
+        table_name TEXT NOT NULL CHECK (
+          table_name IN ('folders', 'sync_cursors')
+        ),
+        row_ordinal INTEGER NOT NULL,
+        row_json TEXT NOT NULL,
+        PRIMARY KEY (migration_id, table_name, row_ordinal)
+      );
+
+      CREATE TABLE identity_partition_repair_operational_records (
+        migration_id TEXT NOT NULL,
+        table_name TEXT NOT NULL CHECK (
+          table_name IN ('ingestion_runs', 'ingestion_errors')
+        ),
+        row_id INTEGER NOT NULL,
+        original_account_id TEXT,
+        target_account_id TEXT,
+        action TEXT NOT NULL CHECK (
+          action IN ('provenance_only', 'move_with_repaired_message', 'move_to_quarantine')
+        ),
+        evidence_code TEXT NOT NULL,
+        PRIMARY KEY (migration_id, table_name, row_id)
+      );
+    `,
+  },
+  {
+    version: 11,
+    name: 'gmail-partition-canonical-state-provenance',
+    // Wrong-identity reconciliation marked many correct canonical rows as
+    // remotely deleted while inserting an active duplicate in the other
+    // partition. Restoring provider-proved canonical eligibility is a distinct
+    // state change, so preserve every original tombstone field separately from
+    // account-move provenance.
+    sql: `
+      CREATE TABLE identity_partition_repair_canonical_state (
+        migration_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL REFERENCES messages(id),
+        original_account_id TEXT NOT NULL,
+        target_account_id TEXT NOT NULL,
+        provider_message_id_hash TEXT NOT NULL,
+        raw_blob_hash TEXT,
+        original_current_eligible INTEGER NOT NULL CHECK (
+          original_current_eligible IN (0, 1)
+        ),
+        original_deleted_remote INTEGER NOT NULL CHECK (
+          original_deleted_remote IN (0, 1)
+        ),
+        original_last_seen_at TEXT NOT NULL,
+        original_updated_at TEXT NOT NULL,
+        restored_last_seen_at TEXT NOT NULL,
+        restored_updated_at TEXT NOT NULL,
+        evidence_code TEXT NOT NULL CHECK (
+          evidence_code = 'LIVE_PROVIDER_OWNERSHIP'
+        ),
+        evidence_digest TEXT NOT NULL,
+        PRIMARY KEY (migration_id, message_id)
+      );
+    `,
+  },
 ];
 
 module.exports = {

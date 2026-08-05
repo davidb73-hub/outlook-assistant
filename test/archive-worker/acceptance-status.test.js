@@ -68,7 +68,15 @@ describe('privacy-safe acceptance status', () => {
       `${JSON.stringify({
         timestamp: '2026-07-18T00:00:00.000Z',
         status: 'completed',
-        accounts: [{ accountId: account.id, status: 'completed' }],
+        downstream: { enabled: false, status: 'gated' },
+        accounts: [
+          {
+            accountId: account.id,
+            status: 'completed',
+            identityVerified: true,
+            identityVerifiedAt: '2026-07-18T00:00:00.000Z',
+          },
+        ],
       })}\n`
     );
   });
@@ -86,6 +94,7 @@ describe('privacy-safe acceptance status', () => {
     });
 
     expect(report.integrity).toBe('ok');
+    expect(report.activeCrossAccountProviderIdOverlap).toBe(0);
     expect(report.accounts[0]).toEqual(
       expect.objectContaining({
         messages: 1,
@@ -111,6 +120,7 @@ describe('privacy-safe acceptance status', () => {
         startedAt: '2026-07-18T00:00:00.000Z',
         completedCycles: 1,
         requiredCompletedCycles: 288,
+        logBytesWithinBound: true,
         satisfies72HourUnattended: false,
       })
     );
@@ -124,7 +134,17 @@ describe('privacy-safe acceptance status', () => {
       events.push({
         timestamp: new Date(firstAt + index * 15 * 60 * 1000).toISOString(),
         status: 'completed',
-        accounts: [{ accountId: account.id, status: 'completed' }],
+        downstream: { enabled: false, status: 'gated' },
+        accounts: [
+          {
+            accountId: account.id,
+            status: 'completed',
+            identityVerified: true,
+            identityVerifiedAt: new Date(
+              firstAt + index * 15 * 60 * 1000
+            ).toISOString(),
+          },
+        ],
       });
     }
     await fs.writeFile(
@@ -161,9 +181,185 @@ describe('privacy-safe acceptance status', () => {
         resetByFailureAt: new Date(
           firstAt + 200 * 15 * 60 * 1000 - 1
         ).toISOString(),
+        resetReason: 'SCHEDULED_RUN_FAILED',
         completedCycles: REQUIRED_72_HOUR_CYCLES - 200,
         satisfies72HourUnattended: false,
       })
+    );
+  });
+
+  test('a completed event without identity proof cannot start the clean window', async () => {
+    await fs.writeFile(
+      path.join(root, 'logs', 'scheduled.jsonl'),
+      `${JSON.stringify({
+        timestamp: '2026-07-18T00:00:00.000Z',
+        status: 'completed',
+        downstream: { enabled: false, status: 'gated' },
+        accounts: [{ accountId: account.id, status: 'completed' }],
+      })}\n`
+    );
+
+    const report = await buildAcceptanceStatus({
+      config: { accounts: [account], logsDir: path.join(root, 'logs') },
+      database,
+      now: Date.parse('2026-07-18T01:00:00.000Z'),
+    });
+
+    expect(report.unattended.currentCleanWindow).toEqual(
+      expect.objectContaining({
+        resetByFailureAt: '2026-07-18T00:00:00.000Z',
+        resetReason: 'IDENTITY_OR_ACCOUNT_CYCLE_UNVERIFIED',
+        startedAt: null,
+        completedCycles: 0,
+        satisfies72HourUnattended: false,
+      })
+    );
+  });
+
+  test('an empty operational log never manufactures 72 elapsed hours', async () => {
+    await fs.writeFile(path.join(root, 'logs', 'scheduled.jsonl'), '');
+
+    const report = await buildAcceptanceStatus({
+      config: { accounts: [account], logsDir: path.join(root, 'logs') },
+      database,
+      now: Date.parse('2026-07-21T00:00:00.000Z'),
+    });
+
+    expect(report.unattended.firstEventAt).toBeNull();
+    expect(report.unattended.elapsedHoursSinceFirstEvent).toBe(0);
+    expect(report.unattended.satisfies72HourElapsed).toBe(false);
+    expect(report.unattended.currentCleanWindow).toEqual(
+      expect.objectContaining({
+        startedAt: null,
+        completedCycles: 0,
+        satisfies72HourUnattended: false,
+      })
+    );
+  });
+
+  test('non-cycle events cannot extend a verified clean window', async () => {
+    const events = [
+      {
+        timestamp: '2026-07-18T00:00:00.000Z',
+        status: 'completed',
+      },
+      {
+        timestamp: '2026-07-18T00:15:00.000Z',
+        status: 'completed',
+        downstream: { enabled: false, status: 'gated' },
+        accounts: [
+          {
+            accountId: account.id,
+            status: 'completed',
+            identityVerified: true,
+            identityVerifiedAt: '2026-07-18T00:15:00.000Z',
+          },
+        ],
+      },
+      {
+        timestamp: '2026-07-18T00:30:00.000Z',
+        status: 'completed',
+      },
+    ];
+    await fs.writeFile(
+      path.join(root, 'logs', 'scheduled.jsonl'),
+      `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
+    );
+
+    const report = await buildAcceptanceStatus({
+      config: { accounts: [account], logsDir: path.join(root, 'logs') },
+      database,
+      now: Date.parse('2026-07-18T01:00:00.000Z'),
+    });
+
+    expect(report.unattended.currentCleanWindow).toEqual(
+      expect.objectContaining({
+        startedAt: '2026-07-18T00:15:00.000Z',
+        lastEventAt: '2026-07-18T00:15:00.000Z',
+        completedCycles: 1,
+      })
+    );
+  });
+
+  test.each([
+    {
+      label: 'degraded provider cycle',
+      event: {
+        timestamp: '2026-07-18T00:15:00.000Z',
+        status: 'degraded',
+        errorCode: 'PROVIDER_RATE_LIMITED',
+      },
+      reason: 'PROVIDER_RATE_LIMITED',
+    },
+    {
+      label: 'downstream-enabled cycle',
+      event: {
+        timestamp: '2026-07-18T00:15:00.000Z',
+        status: 'completed',
+        downstream: { enabled: true, status: 'enabled' },
+        accounts: [
+          {
+            accountId: account.id,
+            status: 'completed',
+            identityVerified: true,
+            identityVerifiedAt: '2026-07-18T00:15:00.000Z',
+          },
+        ],
+      },
+      reason: 'DOWNSTREAM_NOT_GATED',
+    },
+  ])('$label resets the clean window', async ({ event, reason }) => {
+    await fs.appendFile(
+      path.join(root, 'logs', 'scheduled.jsonl'),
+      `${JSON.stringify(event)}\n`
+    );
+
+    const report = await buildAcceptanceStatus({
+      config: { accounts: [account], logsDir: path.join(root, 'logs') },
+      database,
+      now: Date.parse('2026-07-18T01:00:00.000Z'),
+    });
+
+    expect(report.unattended.currentCleanWindow).toEqual(
+      expect.objectContaining({
+        resetByFailureAt: event.timestamp,
+        resetReason: reason,
+        startedAt: null,
+        completedCycles: 0,
+        satisfies72HourUnattended: false,
+      })
+    );
+  });
+
+  test('active Gmail provider-ID overlap blocks automated acceptance', async () => {
+    const otherAccount = {
+      id: 'gmail-ablative',
+      provider: 'gmail',
+      displayName: 'Ablative Gmail',
+    };
+    database.upsertAccount(otherAccount);
+    database.stageMessage(
+      otherAccount.id,
+      {
+        providerMessageId: 'message-1',
+        subject: 'Synthetic duplicate fixture',
+        direction: 'inbound',
+        locations: [],
+        attachments: [],
+      },
+      null
+    );
+
+    const report = await buildAcceptanceStatus({
+      config: { accounts: [account], logsDir: path.join(root, 'logs') },
+      database,
+      now: Date.parse('2026-07-18T01:00:00.000Z'),
+    });
+
+    expect(report.activeCrossAccountProviderIdOverlap).toBe(1);
+    expect(report.automatedArchiveGate.passed).toBe(false);
+    expect(report.unattended.currentCleanWindow.satisfies72HourUnattended).toBe(
+      false
     );
   });
 

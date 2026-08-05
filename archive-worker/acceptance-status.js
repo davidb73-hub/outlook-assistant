@@ -4,6 +4,7 @@ const path = require('path');
 const SCHEDULE_INTERVAL_MS = 15 * 60 * 1000;
 const UNATTENDED_ACCEPTANCE_MS = 72 * 60 * 60 * 1000;
 const REQUIRED_72_HOUR_CYCLES = UNATTENDED_ACCEPTANCE_MS / SCHEDULE_INTERVAL_MS;
+const MAX_ACCEPTANCE_LOG_BYTES = 5 * 2 * 1024 * 1024;
 
 function metadata(row) {
   try {
@@ -185,32 +186,94 @@ async function buildAcceptanceStatus({ config, database, now = Date.now() }) {
       event.status === 'failed' &&
       String(event.errorMessage || '').includes('already running as process')
   ).length;
-  const lastFailureIndex = datedEvents.findLastIndex(
-    ({ event }) => event.status === 'failed'
-  );
-  const lastFailureMs =
-    lastFailureIndex >= 0 ? datedEvents[lastFailureIndex].timestampMs : null;
-  const cleanEvents = datedEvents.slice(lastFailureIndex + 1);
-  const cleanScheduledCycles = cleanEvents.filter(({ event }) =>
-    Array.isArray(event.accounts)
-  );
-  const cleanCompletedCycles = cleanScheduledCycles.filter(
-    ({ event }) => event.status === 'completed'
-  );
-  const cleanStartMs = cleanEvents[0]?.timestampMs || null;
-  const cleanLastEventMs = cleanEvents.at(-1)?.timestampMs || null;
-  const cleanElapsedMs = cleanStartMs === null ? 0 : now - cleanStartMs;
-  const cleanLastEventAgeMs =
-    cleanLastEventMs === null ? null : now - cleanLastEventMs;
   const integrity = database.db.pragma('integrity_check', { simple: true });
+  const activeCrossAccountProviderIdOverlap = Number(
+    database.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM (
+           SELECT m.provider_message_id
+           FROM messages m
+           JOIN accounts a ON a.id = m.account_id AND a.enabled = 1
+           WHERE a.provider = 'gmail'
+           GROUP BY m.provider_message_id
+           HAVING COUNT(DISTINCT m.account_id) > 1
+         )`
+      )
+      .get().count
+  );
+
+  const configuredAccountIds = [...config.accounts]
+    .map((account) => account.id)
+    .sort();
+  const isVerifiedArchiveOnlyCycle = (event) => {
+    if (event.status !== 'completed' || !Array.isArray(event.accounts)) {
+      return false;
+    }
+    const eventTimestampMs = new Date(event.timestamp || '').getTime();
+    if (!Number.isFinite(eventTimestampMs)) return false;
+    const observedAccountIds = event.accounts
+      .map((account) => account.accountId)
+      .sort();
+    return (
+      JSON.stringify(observedAccountIds) ===
+        JSON.stringify(configuredAccountIds) &&
+      event.accounts.every((account) => {
+        const verifiedAtMs = new Date(
+          account.identityVerifiedAt || ''
+        ).getTime();
+        return (
+          account.status === 'completed' &&
+          account.identityVerified === true &&
+          Number.isFinite(verifiedAtMs) &&
+          verifiedAtMs <= eventTimestampMs + 30_000 &&
+          eventTimestampMs - verifiedAtMs <= 2 * SCHEDULE_INTERVAL_MS
+        );
+      }) &&
+      event.downstream?.enabled === false &&
+      event.downstream?.status === 'gated'
+    );
+  };
+
+  const lastResetIndex = datedEvents.findLastIndex(
+    ({ event }) =>
+      event.status !== 'completed' ||
+      (Array.isArray(event.accounts) && !isVerifiedArchiveOnlyCycle(event))
+  );
+  const lastResetMs =
+    lastResetIndex >= 0 ? datedEvents[lastResetIndex].timestampMs : null;
+  const lastResetEvent =
+    lastResetIndex >= 0 ? datedEvents[lastResetIndex].event : null;
+  let lastResetReason = null;
+  if (lastResetEvent?.status !== 'completed') {
+    lastResetReason =
+      lastResetEvent?.errorCode || lastResetEvent?.status || null;
+  } else if (lastResetEvent?.downstream?.enabled === true) {
+    lastResetReason = 'DOWNSTREAM_NOT_GATED';
+  } else if (lastResetEvent) {
+    lastResetReason = 'IDENTITY_OR_ACCOUNT_CYCLE_UNVERIFIED';
+  }
+  const verifiedCleanEvents = datedEvents.slice(lastResetIndex + 1);
+  const verifiedCleanCycles = verifiedCleanEvents.filter(({ event }) =>
+    isVerifiedArchiveOnlyCycle(event)
+  );
+  const verifiedCleanStartMs = verifiedCleanCycles[0]?.timestampMs || null;
+  const verifiedCleanLastEventMs =
+    verifiedCleanCycles.at(-1)?.timestampMs || null;
+  const verifiedCleanElapsedMs =
+    verifiedCleanStartMs === null ? 0 : now - verifiedCleanStartMs;
+  const verifiedCleanLastEventAgeMs =
+    verifiedCleanLastEventMs === null ? null : now - verifiedCleanLastEventMs;
 
   return {
     generatedAt: new Date(now).toISOString(),
     integrity,
+    activeCrossAccountProviderIdOverlap,
     accounts,
     automatedArchiveGate: {
       passed:
         integrity === 'ok' &&
+        activeCrossAccountProviderIdOverlap === 0 &&
         accounts.every(
           (account) =>
             account.backfillComplete &&
@@ -242,32 +305,40 @@ async function buildAcceptanceStatus({ config, database, now = Date.now() }) {
       overlapRejections,
       logBytes: operational.bytes,
       malformedLogLines: operational.malformedLines,
-      satisfies72HourElapsed: now - firstEventMs >= UNATTENDED_ACCEPTANCE_MS,
+      satisfies72HourElapsed:
+        validTimes.length > 0 && now - firstEventMs >= UNATTENDED_ACCEPTANCE_MS,
       currentCleanWindow: {
-        resetByFailureAt: lastFailureMs
-          ? new Date(lastFailureMs).toISOString()
+        resetByFailureAt: lastResetMs
+          ? new Date(lastResetMs).toISOString()
           : null,
-        startedAt: cleanStartMs ? new Date(cleanStartMs).toISOString() : null,
-        lastEventAt: cleanLastEventMs
-          ? new Date(cleanLastEventMs).toISOString()
+        resetReason: lastResetReason,
+        startedAt: verifiedCleanStartMs
+          ? new Date(verifiedCleanStartMs).toISOString()
+          : null,
+        lastEventAt: verifiedCleanLastEventMs
+          ? new Date(verifiedCleanLastEventMs).toISOString()
           : null,
         elapsedHours:
-          cleanStartMs === null
+          verifiedCleanStartMs === null
             ? 0
-            : Math.floor((cleanElapsedMs / 3_600_000) * 100) / 100,
-        scheduledCycles: cleanScheduledCycles.length,
-        completedCycles: cleanCompletedCycles.length,
+            : Math.floor((verifiedCleanElapsedMs / 3_600_000) * 100) / 100,
+        scheduledCycles: verifiedCleanCycles.length,
+        completedCycles: verifiedCleanCycles.length,
         requiredCompletedCycles: REQUIRED_72_HOUR_CYCLES,
         lastEventAgeMinutes:
-          cleanLastEventAgeMs === null
+          verifiedCleanLastEventAgeMs === null
             ? null
-            : Math.floor((cleanLastEventAgeMs / 60_000) * 100) / 100,
+            : Math.floor((verifiedCleanLastEventAgeMs / 60_000) * 100) / 100,
+        logBytesWithinBound: operational.bytes <= MAX_ACCEPTANCE_LOG_BYTES,
+        activeCrossAccountProviderIdOverlap,
         satisfies72HourUnattended:
           operational.malformedLines === 0 &&
-          cleanElapsedMs >= UNATTENDED_ACCEPTANCE_MS &&
-          cleanCompletedCycles.length >= REQUIRED_72_HOUR_CYCLES &&
-          cleanLastEventAgeMs !== null &&
-          cleanLastEventAgeMs <= 2 * SCHEDULE_INTERVAL_MS,
+          operational.bytes <= MAX_ACCEPTANCE_LOG_BYTES &&
+          activeCrossAccountProviderIdOverlap === 0 &&
+          verifiedCleanElapsedMs >= UNATTENDED_ACCEPTANCE_MS &&
+          verifiedCleanCycles.length >= REQUIRED_72_HOUR_CYCLES &&
+          verifiedCleanLastEventAgeMs !== null &&
+          verifiedCleanLastEventAgeMs <= 2 * SCHEDULE_INTERVAL_MS,
       },
     },
   };
@@ -278,5 +349,6 @@ module.exports = {
   metadata,
   percentile,
   readOperationalEvents,
+  MAX_ACCEPTANCE_LOG_BYTES,
   REQUIRED_72_HOUR_CYCLES,
 };

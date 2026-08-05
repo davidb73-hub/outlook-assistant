@@ -19,6 +19,7 @@ describe('local-worker config', () => {
       GMAIL_PERSONAL_CLIENT_ID: 'personal-client',
       GMAIL_PERSONAL_CLIENT_SECRET: 'personal-secret',
       GMAIL_PERSONAL_ACCOUNT_LABEL: 'Personal Gmail',
+      GMAIL_PERSONAL_EXPECTED_EMAIL: 'personal@example.test',
     });
 
     expect(config.providers).toEqual([
@@ -29,5 +30,6 @@ describe('local-worker config', () => {
     expect(config.gmail.ablative.clientId).toBe('ablative-client');
     expect(config.gmail.personal.clientId).toBe('personal-client');
     expect(config.gmail.personal.accountLabel).toBe('Personal Gmail');
+    expect(config.gmail.personal.expectedEmail).toBe('personal@example.test');
   });
 });

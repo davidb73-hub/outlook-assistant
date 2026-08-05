@@ -1,0 +1,40 @@
+[package]
+name = "email-archive-aion-worker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "email-archive-synthetic-worker"
+path = "src/bin/synthetic.rs"
+
+[[bin]]
+name = "email-archive-identity-preflight-worker"
+path = "src/bin/identity_preflight.rs"
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+
+[dependencies]
+aion-worker = { version = "=0.11.0", features = ["liminal-transport"] }
+aion-package = "=0.11.0"
+aion-awl = "=0.11.0"
+anyhow = "1"
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

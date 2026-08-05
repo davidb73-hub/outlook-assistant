@@ -120,4 +120,71 @@ describe('encrypted backup and restore', () => {
       })
     );
   }, 30_000);
+
+  test('checks an rclone repository through restic instead of filesystem APIs', async () => {
+    const runner = jest
+      .fn()
+      .mockResolvedValue({ stdout: '{}', stderr: '', code: 0 });
+    const remoteManager = new BackupManager({
+      config: {
+        root: archiveRoot,
+        backupRepository:
+          'rclone:onedrive-vitasci:Email Assistant Archive Backup',
+      },
+      database,
+      runner,
+      passwordProvider: jest.fn().mockResolvedValue('fixture-password'),
+      resticPath: '/opt/homebrew/bin/restic',
+    });
+
+    await expect(
+      remoteManager.ensureRepository('fixture-password')
+    ).resolves.toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledWith(
+      '/opt/homebrew/bin/restic',
+      ['cat', 'config'],
+      expect.objectContaining({
+        cwd: archiveRoot,
+        env: expect.objectContaining({
+          RESTIC_REPOSITORY:
+            'rclone:onedrive-vitasci:Email Assistant Archive Backup',
+        }),
+      })
+    );
+  });
+
+  test('fails closed when an rclone repository probe fails and never runs init', async () => {
+    const probeFailure = new Error('synthetic remote authentication failure');
+    const runner = jest.fn().mockRejectedValue(probeFailure);
+    const remoteManager = new BackupManager({
+      config: {
+        root: archiveRoot,
+        backupRepository:
+          'rclone:onedrive-vitasci:Email Assistant Archive Backup',
+      },
+      database,
+      runner,
+      passwordProvider: jest.fn().mockResolvedValue('fixture-password'),
+      resticPath: '/opt/homebrew/bin/restic',
+    });
+
+    await expect(
+      remoteManager.ensureRepository('fixture-password')
+    ).rejects.toMatchObject({
+      code: 'BACKUP_REMOTE_REPOSITORY_UNVERIFIED',
+      cause: probeFailure,
+    });
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledWith(
+      '/opt/homebrew/bin/restic',
+      ['cat', 'config'],
+      expect.any(Object)
+    );
+    expect(runner).not.toHaveBeenCalledWith(
+      '/opt/homebrew/bin/restic',
+      ['init'],
+      expect.any(Object)
+    );
+  });
 });

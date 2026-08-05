@@ -47,9 +47,9 @@ describe('delivery manifest rejects attachment filenames that are not plain base
     });
     const result = validateDeliveryManifest(manifest);
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.startsWith('unsafe-attachment-name'))).toBe(
-      true
-    );
+    expect(
+      result.errors.some((e) => e.startsWith('unsafe-attachment-name'))
+    ).toBe(true);
   });
 
   test('accepts a plain filename', () => {
@@ -61,7 +61,12 @@ describe('delivery manifest rejects attachment filenames that are not plain base
         rawBlobHash: hash('raw'),
       },
       attachments: [
-        { id: 2, fileName: 'invoice.pdf', blobHash: hash('bytes'), securityStatus: 'safe' },
+        {
+          id: 2,
+          fileName: 'invoice.pdf',
+          blobHash: hash('bytes'),
+          securityStatus: 'safe',
+        },
       ],
       destinations: ['financial-assistant'],
     });
@@ -71,7 +76,9 @@ describe('delivery manifest rejects attachment filenames that are not plain base
 
 describe('buildDeliveryPackage never writes outside the package root', () => {
   test('a traversal filename that reaches the builder throws instead of escaping', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'email-delivery-esc-'));
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'email-delivery-esc-')
+    );
     try {
       const raw = Buffer.from('raw');
       const attachment = Buffer.from('bytes');
@@ -89,12 +96,16 @@ describe('buildDeliveryPackage never writes outside the package root', () => {
           rawBlobHash: hash(raw),
         },
         attachments: [
-          { id: 2, fileName: 'ok.pdf', blobHash: hash(attachment), securityStatus: 'safe' },
+          {
+            id: 2,
+            fileName: 'ok.pdf',
+            blobHash: hash(attachment),
+            securityStatus: 'safe',
+          },
         ],
         destinations: ['financial-assistant'],
       });
-      manifest.attachments[0].file_name =
-        '../../../../escaped-' + Date.now() + '.md';
+      manifest.attachments[0].file_name = `../../../../escaped-${Date.now()}.md`;
       const escapedDir = path.dirname(
         path.resolve(root, 'out', manifest.attachments[0].file_name)
       );
@@ -111,9 +122,7 @@ describe('buildDeliveryPackage never writes outside the package root', () => {
       const planted = path
         .basename(manifest.attachments[0].file_name)
         .replace(/^\.\.[\\/]/g, '');
-      await expect(
-        fs.access(path.join(escapedDir, planted))
-      ).rejects.toThrow();
+      await expect(fs.access(path.join(escapedDir, planted))).rejects.toThrow();
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

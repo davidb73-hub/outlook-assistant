@@ -1,0 +1,19 @@
+{
+  "accounts": {
+    "outlook": {
+      "label": "outlook",
+      "provider": "outlook",
+      "expected_identity": "synthetic-outlook"
+    },
+    "work_gmail": {
+      "label": "work-gmail",
+      "provider": "gmail",
+      "expected_identity": "synthetic-work-gmail"
+    },
+    "personal_gmail": {
+      "label": "personal-gmail",
+      "provider": "gmail",
+      "expected_identity": "synthetic-personal-gmail"
+    }
+  }
+}

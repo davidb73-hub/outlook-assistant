@@ -11,7 +11,11 @@ const {
 function containedPath(root, child) {
   const absolute = path.resolve(root, child);
   const relative = path.relative(root, absolute);
-  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (
+    relative === '' ||
+    relative.startsWith('..') ||
+    path.isAbsolute(relative)
+  ) {
     throw new Error(`Refusing path outside package root: ${child}`);
   }
   return absolute;

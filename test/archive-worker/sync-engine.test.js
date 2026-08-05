@@ -30,6 +30,14 @@ function message(id, subject = id, attachments = []) {
 
 function providerFixture(events, overrides = {}) {
   return {
+    assertArchiveIdentity: jest.fn(async () => ({
+      logicalAccountId: 'gmail-personal',
+      credentialSlot: 'ablative',
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: '2026-08-02T11:00:00.000Z',
+      errorCode: null,
+    })),
     refreshLocations: jest.fn(async () => {
       events.push('locations');
       return [
@@ -74,6 +82,37 @@ function providerFixture(events, overrides = {}) {
     fetchAttachment: jest.fn(),
     ...overrides,
   };
+}
+
+function totalChanges(database) {
+  return database.db.prepare('SELECT total_changes() AS count').get().count;
+}
+
+function accountArchiveRowCounts(database, accountId) {
+  const counts = {
+    accounts: database.db
+      .prepare('SELECT COUNT(*) AS count FROM accounts WHERE id = ?')
+      .get(accountId).count,
+  };
+  const tables = database.db
+    .prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+       ORDER BY name`
+    )
+    .all()
+    .map((row) => row.name)
+    .filter((table) => /^[a-z0-9_]+$/i.test(table));
+  for (const table of tables) {
+    const hasAccountId = database.db
+      .pragma(`table_info("${table}")`)
+      .some((column) => column.name === 'account_id');
+    if (!hasAccountId) continue;
+    counts[table] = database.db
+      .prepare(`SELECT COUNT(*) AS count FROM "${table}" WHERE account_id = ?`)
+      .get(accountId).count;
+  }
+  return counts;
 }
 
 describe('archive sync engine', () => {
@@ -164,6 +203,232 @@ describe('archive sync engine', () => {
     ]);
   });
 
+  test('identity mismatch writes no archive record and does not block a healthy account', async () => {
+    const accounts = [
+      {
+        id: 'gmail-personal',
+        logicalAccountId: 'gmail-personal',
+        provider: 'gmail',
+        displayName: 'Personal Gmail',
+      },
+      {
+        id: 'vitasci-outlook',
+        provider: 'outlook',
+        displayName: 'VitaSci Outlook',
+      },
+    ];
+    await service.initialise(accounts);
+    const failing = providerFixture([]);
+    const mismatch = new Error(
+      'Gmail identity verification failed for gmail-personal'
+    );
+    mismatch.code = 'GMAIL_IDENTITY_MISMATCH';
+    mismatch.retryable = false;
+    failing.assertArchiveIdentity.mockRejectedValue(mismatch);
+    const healthy = providerFixture([]);
+    healthy.assertArchiveIdentity.mockResolvedValue({
+      logicalAccountId: 'vitasci-outlook',
+      credentialSlot: 'default-delegated',
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: '2026-08-02T11:00:00.000Z',
+      errorCode: null,
+    });
+    const engine = new ArchiveSyncEngine({
+      database,
+      service,
+      config: {
+        accounts,
+        incrementalBatchSize: 10,
+        backfillBatchSize: 10,
+        attachmentRetryBatchSize: 10,
+      },
+      providerFactory: (candidate) =>
+        candidate.id === 'gmail-personal' ? failing : healthy,
+    });
+
+    await expect(engine.runAll()).resolves.toEqual([
+      expect.objectContaining({
+        accountId: 'gmail-personal',
+        status: 'failed',
+        error: expect.objectContaining({
+          code: 'GMAIL_IDENTITY_MISMATCH',
+          retryable: false,
+        }),
+      }),
+      expect.objectContaining({
+        accountId: 'vitasci-outlook',
+        status: 'completed',
+      }),
+    ]);
+    expect(failing.refreshLocations).not.toHaveBeenCalled();
+    expect(failing.listRecent).not.toHaveBeenCalled();
+    expect(database.getCursor('gmail-personal', 'incremental')).toBeNull();
+    expect(database.listProviderMessageIds('gmail-personal')).toEqual([]);
+    expect(database.listProviderMessageIds('vitasci-outlook').length).toBe(3);
+    expect(database.unresolvedErrors()).toEqual([]);
+  });
+
+  test('scheduled identity mismatch performs exactly zero database writes', async () => {
+    const provider = providerFixture([], {
+      listInventoryPage: jest.fn(),
+    });
+    const mismatch = new Error('private identity text must not escape');
+    mismatch.code = 'GMAIL_IDENTITY_MISMATCH';
+    mismatch.retryable = false;
+    provider.assertArchiveIdentity.mockRejectedValue(mismatch);
+    const engine = engineFor(provider);
+    const changesBefore = totalChanges(database);
+    const rowsBefore = accountArchiveRowCounts(database, account.id);
+    const cursorsBefore = database.db
+      .prepare(
+        'SELECT scope, cursor, metadata_json FROM sync_cursors WHERE account_id = ? ORDER BY scope'
+      )
+      .all(account.id);
+    const messagesBefore = database.listProviderMessageIds(account.id);
+
+    await expect(engine.runAccountCycle(account)).resolves.toEqual({
+      accountId: account.id,
+      status: 'failed',
+      discovered: 0,
+      archived: 0,
+      errors: 1,
+      error: {
+        code: 'GMAIL_IDENTITY_MISMATCH',
+        message: 'gmail identity verification failed for gmail-personal',
+        retryable: false,
+      },
+    });
+
+    expect(totalChanges(database)).toBe(changesBefore);
+    expect(accountArchiveRowCounts(database, account.id)).toEqual(rowsBefore);
+    expect(
+      database.db
+        .prepare(
+          'SELECT scope, cursor, metadata_json FROM sync_cursors WHERE account_id = ? ORDER BY scope'
+        )
+        .all(account.id)
+    ).toEqual(cursorsBefore);
+    expect(database.listProviderMessageIds(account.id)).toEqual(messagesBefore);
+    expect(provider.refreshLocations).not.toHaveBeenCalled();
+    expect(provider.listRecent).not.toHaveBeenCalled();
+  });
+
+  test('Outlook identity mismatch writes no mail, folder, or cursor state', async () => {
+    const outlookAccount = {
+      id: 'vitasci-outlook',
+      logicalAccountId: 'vitasci-outlook',
+      provider: 'outlook',
+      displayName: 'VitaSci Outlook',
+    };
+    await service.initialise([outlookAccount]);
+    const provider = providerFixture([]);
+    const mismatch = new Error(
+      'Outlook identity verification failed for vitasci-outlook'
+    );
+    mismatch.code = 'OUTLOOK_IDENTITY_MISMATCH';
+    mismatch.retryable = false;
+    provider.assertArchiveIdentity.mockRejectedValue(mismatch);
+    const engine = new ArchiveSyncEngine({
+      database,
+      service,
+      config: {
+        accounts: [outlookAccount],
+        incrementalBatchSize: 10,
+        backfillBatchSize: 10,
+        attachmentRetryBatchSize: 10,
+      },
+      providerFactory: () => provider,
+    });
+
+    await expect(engine.runAll()).resolves.toEqual([
+      expect.objectContaining({
+        accountId: 'vitasci-outlook',
+        status: 'failed',
+        error: expect.objectContaining({
+          code: 'OUTLOOK_IDENTITY_MISMATCH',
+          retryable: false,
+        }),
+      }),
+    ]);
+    expect(provider.refreshLocations).not.toHaveBeenCalled();
+    expect(provider.listRecent).not.toHaveBeenCalled();
+    expect(database.getCursor('vitasci-outlook', 'incremental')).toBeNull();
+    expect(database.listProviderMessageIds('vitasci-outlook')).toEqual([]);
+    expect(
+      database.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM folders
+           WHERE account_id = 'vitasci-outlook'`
+        )
+        .get().count
+    ).toBe(0);
+  });
+
+  test('resolves account-cycle errors only through a same-account guarded healthy run', async () => {
+    await service.initialise([
+      {
+        id: 'gmail-ablative',
+        provider: 'gmail',
+        displayName: 'Ablative Gmail',
+      },
+    ]);
+    database.recordIngestionError({
+      accountId: 'gmail-personal',
+      stage: 'account_cycle',
+      code: 'GMAIL_AUTH',
+      message: 'historical safe fixture failure',
+    });
+    database.recordIngestionError({
+      accountId: 'gmail-ablative',
+      stage: 'account_cycle',
+      code: 'GMAIL_AUTH',
+      message: 'other account safe fixture failure',
+    });
+    database.recordIngestionError({
+      accountId: 'gmail-personal',
+      providerMessageId: 'unrelated-message',
+      stage: 'message_fetch',
+      code: 'TEMPORARY',
+      message: 'message-scoped safe fixture failure',
+    });
+
+    const [result] = await engineFor(providerFixture([])).runAll();
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        resolvedAccountCycleErrors: 1,
+      })
+    );
+    const resolved = database.db
+      .prepare(
+        `SELECT resolved_at, resolution_run_id, resolution_code
+         FROM ingestion_errors
+         WHERE account_id = 'gmail-personal'
+           AND stage = 'account_cycle'`
+      )
+      .get();
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        resolved_at: expect.any(String),
+        resolution_run_id: expect.any(Number),
+        resolution_code: 'GMAIL_IDENTITY_VERIFIED_HEALTHY_CYCLE',
+      })
+    );
+    expect(database.unresolvedErrors()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          account_id: 'gmail-ablative',
+          stage: 'account_cycle',
+        }),
+        expect.objectContaining({
+          account_id: 'gmail-personal',
+          stage: 'message_fetch',
+        }),
+      ])
+    );
+  });
+
   test('isolates an exhausted Gmail 429 while healthy accounts still complete', async () => {
     const accounts = [
       {
@@ -186,6 +451,22 @@ describe('archive sync engine', () => {
     const providers = new Map(
       accounts.map((candidate) => [candidate.id, providerFixture([])])
     );
+    providers.get('vitasci-outlook').assertArchiveIdentity.mockResolvedValue({
+      logicalAccountId: 'vitasci-outlook',
+      credentialSlot: 'default-delegated',
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: '2026-08-02T11:00:00.000Z',
+      errorCode: null,
+    });
+    providers.get('gmail-ablative').assertArchiveIdentity.mockResolvedValue({
+      logicalAccountId: 'gmail-ablative',
+      credentialSlot: 'personal',
+      expectedIdentityConfigured: true,
+      identityMatch: true,
+      verifiedAt: '2026-08-02T11:00:00.000Z',
+      errorCode: null,
+    });
     providers.get('gmail-ablative').fetchBundle.mockRejectedValue(
       new ProviderHttpError('Gmail request exhausted its retry budget', {
         status: 429,
@@ -391,6 +672,139 @@ describe('archive sync engine', () => {
         completedBy: 'full_reconciliation',
       })
     );
+  });
+
+  test('reconciliation identity mismatch performs exactly zero database writes', async () => {
+    database.setCursor(account.id, 'backfill', null, { complete: true });
+    const provider = providerFixture([], {
+      listInventoryPage: jest.fn(),
+    });
+    const mismatch = new Error('private identity text must not escape');
+    mismatch.code = 'GMAIL_IDENTITY_MISMATCH';
+    mismatch.retryable = false;
+    provider.assertArchiveIdentity.mockRejectedValue(mismatch);
+    const engine = engineFor(provider);
+    const changesBefore = totalChanges(database);
+    const rowsBefore = accountArchiveRowCounts(database, account.id);
+    const cursorsBefore = database.db
+      .prepare(
+        'SELECT scope, cursor, metadata_json FROM sync_cursors WHERE account_id = ? ORDER BY scope'
+      )
+      .all(account.id);
+    const messagesBefore = database.listProviderMessageIds(account.id);
+
+    await expect(engine.reconcileAccount(account)).resolves.toEqual({
+      accountId: account.id,
+      status: 'failed',
+      discovered: 0,
+      archived: 0,
+      errors: 1,
+      error: {
+        code: 'GMAIL_IDENTITY_MISMATCH',
+        message: 'gmail identity verification failed for gmail-personal',
+        retryable: false,
+      },
+    });
+
+    expect(totalChanges(database)).toBe(changesBefore);
+    expect(accountArchiveRowCounts(database, account.id)).toEqual(rowsBefore);
+    expect(
+      database.db
+        .prepare(
+          'SELECT scope, cursor, metadata_json FROM sync_cursors WHERE account_id = ? ORDER BY scope'
+        )
+        .all(account.id)
+    ).toEqual(cursorsBefore);
+    expect(database.listProviderMessageIds(account.id)).toEqual(messagesBefore);
+    expect(provider.refreshLocations).not.toHaveBeenCalled();
+    expect(provider.listInventoryPage).not.toHaveBeenCalled();
+  });
+
+  test('full guarded reconciliation resolves only causally proved retrieval errors', async () => {
+    database.recordIngestionError({
+      accountId: account.id,
+      stage: 'reconciliation',
+      code: 'TEMPORARY',
+      message: 'historical reconciliation fixture',
+    });
+    database.recordIngestionError({
+      accountId: account.id,
+      providerMessageId: 'inventory-message',
+      stage: 'message_fetch',
+      code: 'TEMPORARY',
+      message: 'historical message fixture',
+    });
+    database.recordIngestionError({
+      accountId: account.id,
+      providerMessageId: 'inventory-message',
+      stage: 'routing',
+      code: 'ROUTE_FAILED',
+      message: 'deferred routing fixture',
+    });
+    database.stageMessage(account.id, message('remote-tombstone'), null);
+    database.recordTombstone(account.id, 'remote-tombstone', {
+      reason: 'synthetic fixture',
+    });
+    database.recordIngestionError({
+      accountId: account.id,
+      providerMessageId: 'remote-tombstone',
+      stage: 'tombstone',
+      code: 'TEMPORARY',
+      message: 'historical tombstone fixture',
+    });
+    const provider = providerFixture([], {
+      listInventoryPage: jest.fn(async () => ({
+        refs: [{ id: 'inventory-message' }],
+        nextCursor: null,
+        complete: true,
+      })),
+    });
+
+    const result = await engineFor(provider).reconcileAccount(account);
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        differences: 0,
+        resolvedReconciliationErrors: {
+          reconciliations: 1,
+          // The newly archived inventory message is resolved immediately by
+          // archiveRefs. The reconciliation end-phase resolves the remaining
+          // proved tombstone, so this is deliberately an end-phase count.
+          messageScoped: 1,
+        },
+      })
+    );
+    expect(database.unresolvedErrors()).toEqual([
+      expect.objectContaining({
+        account_id: account.id,
+        provider_message_id: 'inventory-message',
+        stage: 'routing',
+      }),
+    ]);
+    expect(
+      database.db
+        .prepare(
+          `SELECT stage, resolution_code
+           FROM ingestion_errors
+           WHERE resolved_at IS NOT NULL
+             AND resolution_run_id IS NOT NULL
+           ORDER BY stage`
+        )
+        .all()
+    ).toEqual([
+      {
+        stage: 'message_fetch',
+        resolution_code: 'MESSAGE_ARCHIVED_COMPLETE',
+      },
+      {
+        stage: 'reconciliation',
+        resolution_code: 'GMAIL_IDENTITY_VERIFIED_FULL_RECONCILIATION',
+      },
+      {
+        stage: 'tombstone',
+        resolution_code: 'GMAIL_IDENTITY_VERIFIED_FULL_RECONCILIATION',
+      },
+    ]);
   });
 
   test('reports a reconciliation 429 as rate-limited rather than failed', async () => {

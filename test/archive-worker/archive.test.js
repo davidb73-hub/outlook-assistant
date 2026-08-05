@@ -4,7 +4,8 @@ const path = require('path');
 const { ArchiveService } = require('../../archive-worker/archive-service');
 const { ArchiveDatabase } = require('../../archive-worker/database');
 const { ContentStore, sha256 } = require('../../archive-worker/storage');
-const { verifyArchive } = require('../../archive-worker');
+const { inspectFtsConsistency } = require('../../archive-worker/fts-index');
+const { openArchive, verifyArchive } = require('../../archive-worker');
 
 function fixtureMessage(overrides = {}) {
   return {
@@ -100,7 +101,127 @@ describe('private archive foundation', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all()
         .map((row) => row.version)
-    ).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  test('routine status omits raw run details, provider IDs, and error text', () => {
+    const runDetailsMarker = 'PRIVATE_RUN_DETAILS_MARKER';
+    const providerIdMarker = 'PRIVATE_PROVIDER_ID_MARKER';
+    const errorMessageMarker = 'PRIVATE_ERROR_MESSAGE_MARKER';
+    const runId = database.beginRun('gmail-personal', 'scheduled_cycle', {
+      marker: runDetailsMarker,
+    });
+    database.finishRun(
+      runId,
+      'failed',
+      { discovered: 1, archived: 0, errors: 1 },
+      { marker: runDetailsMarker }
+    );
+    database.recordIngestionError({
+      runId,
+      accountId: 'gmail-personal',
+      providerMessageId: providerIdMarker,
+      stage: 'message_fetch',
+      code: 'SYNTHETIC_FAILURE',
+      message: errorMessageMarker,
+      retryable: true,
+    });
+
+    expect(database.recentRuns()[0].details_json).toContain(runDetailsMarker);
+    expect(database.unresolvedErrors()[0]).toEqual(
+      expect.objectContaining({
+        provider_message_id: providerIdMarker,
+        error_message: errorMessageMarker,
+      })
+    );
+    const routineStatus = JSON.stringify(database.status());
+    expect(routineStatus).not.toContain(runDetailsMarker);
+    expect(routineStatus).not.toContain(providerIdMarker);
+    expect(routineStatus).not.toContain(errorMessageMarker);
+    expect(database.status().unresolvedErrors).toEqual([
+      expect.objectContaining({
+        account_id: 'gmail-personal',
+        retryable: 1,
+        error_count: 1,
+      }),
+    ]);
+  });
+
+  test('normal archive opening defers account registration to guarded cycles', async () => {
+    const guardedRoot = path.join(tempRoot, 'guarded-open');
+    const archive = await openArchive({
+      ...process.env,
+      EMAIL_ARCHIVE_ROOT: guardedRoot,
+      EMAIL_ARCHIVE_OUTLOOK_EXPECTED_IDENTITY: 'outlook@example.test',
+      EMAIL_ARCHIVE_GMAIL_ABLATIVE_EXPECTED_IDENTITY: 'ablative@example.test',
+      EMAIL_ARCHIVE_GMAIL_PERSONAL_EXPECTED_IDENTITY: 'personal@example.test',
+    });
+    try {
+      expect(
+        archive.database.db
+          .prepare('SELECT COUNT(*) AS count FROM accounts')
+          .get().count
+      ).toBe(0);
+    } finally {
+      archive.database.close();
+    }
+  });
+
+  test('re-registering an unchanged account is an exact database no-op', () => {
+    const account = {
+      id: 'gmail-personal',
+      provider: 'gmail',
+      displayName: 'Personal Gmail',
+    };
+    const rowBefore = database.db
+      .prepare('SELECT * FROM accounts WHERE id = ?')
+      .get(account.id);
+    const changesBefore = database.db
+      .prepare('SELECT total_changes() AS count')
+      .get().count;
+
+    expect(database.upsertAccount(account)).toBe(0);
+
+    expect(
+      database.db.prepare('SELECT total_changes() AS count').get().count
+    ).toBe(changesBefore);
+    expect(
+      database.db.prepare('SELECT * FROM accounts WHERE id = ?').get(account.id)
+    ).toEqual(rowBefore);
+  });
+
+  test('invalidates the FTS rowid cache after a staging rollback', () => {
+    const originalGetMessageById = database.getMessageById.bind(database);
+    jest
+      .spyOn(database, 'getMessageById')
+      .mockImplementationOnce(() => {
+        throw new Error('synthetic post-FTS rollback');
+      })
+      .mockImplementation(originalGetMessageById);
+    const message = fixtureMessage({
+      providerMessageId: 'fts-rollback-fixture',
+      attachments: [],
+      hasAttachments: false,
+    });
+
+    expect(() =>
+      database.stageMessage('vitasci-outlook', message, null)
+    ).toThrow('synthetic post-FTS rollback');
+    expect(
+      database.getMessage('vitasci-outlook', 'fts-rollback-fixture')
+    ).toBeNull();
+    expect(inspectFtsConsistency(database).summary).toEqual(
+      expect.objectContaining({ messageRows: 0, ftsRows: 0, passed: true })
+    );
+
+    expect(database.stageMessage('vitasci-outlook', message, null)).toEqual(
+      expect.objectContaining({
+        provider_message_id: message.providerMessageId,
+      })
+    );
+    expect(inspectFtsConsistency(database).summary).toEqual(
+      expect.objectContaining({ messageRows: 1, ftsRows: 1, passed: true })
+    );
   });
 
   test('stages raw content, searches it, and completes attachments', async () => {
@@ -344,7 +465,7 @@ describe('private archive foundation', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all()
         .map((row) => row.version)
-    ).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     upgraded.close();
   });
 
@@ -392,5 +513,36 @@ describe('private archive foundation', () => {
     expect(
       database.recentRuns().find((run) => run.id === completed).status
     ).toBe('completed');
+  });
+
+  test('recovers running rows only for identity-proved account scopes', () => {
+    const proved = database.beginRun('vitasci-outlook', 'scheduled_cycle');
+    const unproved = database.beginRun('gmail-personal', 'scheduled_cycle');
+
+    expect(
+      database.interruptRunningRuns('identity_scoped_recovery', {
+        accountIds: ['vitasci-outlook'],
+      })
+    ).toBe(1);
+    expect(
+      database.db
+        .prepare('SELECT status FROM ingestion_runs WHERE id = ?')
+        .get(proved).status
+    ).toBe('interrupted');
+    expect(
+      database.db
+        .prepare('SELECT status FROM ingestion_runs WHERE id = ?')
+        .get(unproved).status
+    ).toBe('running');
+    expect(
+      database.interruptRunningRuns('empty_identity_scope', {
+        accountIds: [],
+      })
+    ).toBe(0);
+    expect(
+      database.db
+        .prepare('SELECT status FROM ingestion_runs WHERE id = ?')
+        .get(unproved).status
+    ).toBe('running');
   });
 });

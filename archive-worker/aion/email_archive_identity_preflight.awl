@@ -1,0 +1,37 @@
+//! Prove that all three configured OAuth credentials match their semantic account slots.
+//! This workflow performs provider-profile reads only. It never opens the archive database,
+//! advances a cursor, persists a refreshed token, downloads mail, or changes a mailbox.
+workflow email_archive_identity_preflight
+  input confirmation: String
+  outcome ready:   type IdentityAudit, route success
+  outcome blocked: type IdentityAudit, route failure
+
+type IdentityBinding {
+  logical_account_id: String,
+  credential_slot: String,
+  expected_identity_configured: Bool,
+  identity_match: Bool,
+  verified_at: String,
+  error_code: String,
+}
+
+type IdentityAudit {
+  passed: Bool,
+  generated_at: String,
+  accounts: [IdentityBinding],
+  archive_opened: Bool,
+  credentials_persisted: Bool,
+}
+
+worker email_archive_identity_preflight
+  action audit_identity_bindings(confirmation: String) -> IdentityAudit
+    timeout 45s
+
+step audit_bindings
+  audit_identity_bindings(confirmation: confirmation) -> audit
+
+  on failure
+    route blocked(passed: false, generated_at: "", accounts: [], archive_opened: false, credentials_persisted: false)
+
+  outcome verified: when audit.passed, route ready(audit)
+  outcome rejected: otherwise, route blocked(audit)

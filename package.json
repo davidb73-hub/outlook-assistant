@@ -16,6 +16,12 @@
     "triage:gmail-check": "node local-worker/gmail-check.js",
     "archive:init": "node archive-worker/index.js init",
     "archive:status": "node archive-worker/index.js status",
+    "archive:identity-status": "node archive-worker/index.js identity-status",
+    "archive:seed-identities": "node archive-worker/index.js seed-archive-identities",
+    "archive:rehearse-gmail-repair": "node archive-worker/index.js rehearse-gmail-partition-repair",
+    "archive:approve-live-gmail-repair": "node archive-worker/index.js approve-live-gmail-partition-repair",
+    "archive:live-gmail-repair": "node archive-worker/index.js live-gmail-partition-repair",
+    "archive:pre-repair-backup": "node archive-worker/index.js pre-repair-backup",
     "archive:acceptance-status": "node archive-worker/index.js acceptance-status",
     "archive:sync": "node archive-worker/index.js sync",
     "archive:reconcile": "node archive-worker/index.js reconcile",
@@ -117,6 +123,6 @@
   },
   "overrides": {
     "minimatch": ">=3.1.3",
-    "hono": "4.12.30"
+    "hono": "4.12.34"
   }
 }

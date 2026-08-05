@@ -8,6 +8,7 @@ backup_claude
 *.mov
 **/state/
 **/reports/
+**/target/
 .agents/
 .claude-flow/
 .swarm/

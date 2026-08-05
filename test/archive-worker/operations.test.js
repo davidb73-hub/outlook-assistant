@@ -5,7 +5,10 @@ const {
   MAX_LOG_BYTES,
   appendOperationalLog,
   eventExitCode,
+  problemFingerprint,
+  runDownstreamStage,
   scheduledStatus,
+  updateFailureNotification,
 } = require('../../archive-worker/scheduled');
 const { WorkerLock } = require('../../archive-worker/lock');
 const {
@@ -74,6 +77,20 @@ describe('unattended archive operations', () => {
     expect(eventExitCode({ status: 'completed' })).toBe(0);
     expect(eventExitCode({ status: 'degraded' })).toBe(0);
     expect(eventExitCode({ status: 'failed' })).toBe(1);
+  });
+
+  test('does not execute deferred routing or delivery unless explicitly enabled', async () => {
+    const stage = jest.fn().mockResolvedValue(['executed']);
+
+    await expect(
+      runDownstreamStage({ downstreamDeliveryEnabled: false }, stage)
+    ).resolves.toEqual([]);
+    expect(stage).not.toHaveBeenCalled();
+
+    await expect(
+      runDownstreamStage({ downstreamDeliveryEnabled: true }, stage)
+    ).resolves.toEqual(['executed']);
+    expect(stage).toHaveBeenCalledTimes(1);
   });
 
   test('keeps one rate-limited account visible without reporting a whole-job crash', () => {
@@ -147,20 +164,74 @@ describe('unattended archive operations', () => {
     ).resolves.toBe('/fallback/node');
   });
 
-  test('builds a content-free macOS failure notification without a shell', async () => {
+  test('builds an actionable content-free macOS failure notification without a shell', async () => {
     const execFileImpl = jest.fn((_file, _args, _options, callback) =>
       callback(null)
     );
-    await expect(notifyArchiveFailure({ execFileImpl })).resolves.toEqual({
-      status: 'sent',
-    });
+    await expect(
+      notifyArchiveFailure({
+        execFileImpl,
+        existsSyncImpl: () => true,
+        notifierPath: '/safe/terminal-notifier',
+        openCommand: '/safe/open-command-centre',
+      })
+    ).resolves.toEqual({ status: 'sent' });
     expect(execFileImpl).toHaveBeenCalledWith(
-      '/usr/bin/osascript',
-      expect.arrayContaining(['-e', expect.stringContaining('archive')]),
+      '/safe/terminal-notifier',
+      expect.arrayContaining([
+        '-message',
+        expect.stringContaining('Command Centre'),
+        '-execute',
+        '/safe/open-command-centre',
+      ]),
       { timeout: 10_000 },
       expect.any(Function)
     );
     expect(execFileImpl.mock.calls[0][1].join(' ')).not.toContain('@');
     expect(appleScriptString('one "two"\nthree')).toBe('"one \\"two\\" three"');
+  });
+
+  test('notifies once per distinct failure and once on recovery', async () => {
+    const config = { logsDir: path.join(root, 'logs') };
+    const failureNotifier = jest.fn().mockResolvedValue({ status: 'sent' });
+    const recoveryNotifier = jest.fn().mockResolvedValue({ status: 'sent' });
+    const failed = {
+      timestamp: '2026-08-01T00:00:00.000Z',
+      status: 'failed',
+      accounts: [
+        {
+          accountId: 'gmail-personal',
+          status: 'failed',
+          errorCode: 'GMAIL_AUTH',
+        },
+      ],
+    };
+
+    expect(problemFingerprint(failed)).toHaveLength(64);
+    await expect(
+      updateFailureNotification(config, failed, {
+        failureNotifier,
+        recoveryNotifier,
+      })
+    ).resolves.toEqual({ status: 'sent' });
+    await expect(
+      updateFailureNotification(config, failed, {
+        failureNotifier,
+        recoveryNotifier,
+      })
+    ).resolves.toEqual({
+      status: 'suppressed',
+      reason: 'unchanged_failure',
+    });
+    expect(failureNotifier).toHaveBeenCalledTimes(1);
+
+    await expect(
+      updateFailureNotification(
+        config,
+        { timestamp: '2026-08-01T00:15:00.000Z', status: 'completed' },
+        { failureNotifier, recoveryNotifier }
+      )
+    ).resolves.toEqual({ status: 'sent' });
+    expect(recoveryNotifier).toHaveBeenCalledTimes(1);
   });
 });

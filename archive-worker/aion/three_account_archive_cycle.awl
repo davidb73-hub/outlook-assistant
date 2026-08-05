@@ -1,0 +1,167 @@
+//! Exercise the archive lifecycle with deterministic synthetic data only.
+//! This workflow cannot access credentials, mailboxes, the archive, or backups.
+workflow three_account_archive_cycle
+  input accounts: ThreeAccounts
+  outcome completed:             type FinalSummary, route success
+  outcome activity_failed:       type FinalSummary, route failure
+  outcome identity_rejected:     type FinalSummary, route failure
+  outcome reconciliation_failed: type FinalSummary, route failure
+  outcome integrity_failed:      type FinalSummary, route failure
+  outcome backup_failed:         type FinalSummary, route failure
+
+type AccountSpec { label: String, provider: String, expected_identity: String }
+
+type ThreeAccounts { outlook: AccountSpec, work_gmail: AccountSpec, personal_gmail: AccountSpec }
+
+type IdentityCheck { label: String, matched: Bool, observed_identity: String, note: String }
+
+type IdentityAssessment { ok: Bool, reason: String }
+
+type SyncStatus = Synchronized | Deferred | Blocked
+
+type SyncReport {
+  label: String,
+  status: SyncStatus,
+  checkpoint_advanced: Bool,
+  discovered: Int,
+  archived: Int,
+  deferred: Int,
+  note: String,
+}
+
+type ReconciliationReport {
+  ok: Bool,
+  compared_accounts: Int,
+  missing_messages: Int,
+  missing_attachments: Int,
+  discrepancies: Int,
+  deferred_items: Int,
+  reason: String,
+}
+
+type IntegrityReport { ok: Bool, checked_records: Int, invalid_records: Int, reason: String }
+
+type BackupReceipt { ok: Bool, snapshot_id: String, verified: Bool, reason: String }
+
+type FinalSummary {
+  status: String,
+  phase: String,
+  summary: String,
+  accounts_checked: Int,
+  accounts_synchronized: Int,
+  discrepancies: Int,
+  backup_snapshot: String,
+}
+
+worker archive_ops
+  action check_identity(account: AccountSpec) -> IdentityCheck
+    timeout 30s, retry 2 backoff 1s..5s
+
+  action assess_identities(outlook: IdentityCheck, work_gmail: IdentityCheck, personal_gmail: IdentityCheck) -> IdentityAssessment
+
+  action synchronize(account: AccountSpec, identity: IdentityCheck) -> SyncReport
+    timeout 15m, retry 3 backoff 5s..1m
+
+  action reconcile(outlook: SyncReport, work_gmail: SyncReport, personal_gmail: SyncReport) -> ReconciliationReport
+    timeout 5m
+
+  action verify_integrity(reconciliation: ReconciliationReport) -> IntegrityReport
+    timeout 10m
+
+  action create_backup(integrity: IntegrityReport) -> BackupReceipt
+    timeout 30m, retry 2 backoff 30s..5m
+
+  action summarize_success(outlook: SyncReport, work_gmail: SyncReport, personal_gmail: SyncReport, reconciliation: ReconciliationReport, integrity: IntegrityReport, backup: BackupReceipt) -> FinalSummary
+
+  action summarize_failure(phase: String, reason: String) -> FinalSummary
+
+step check_identities
+  fork
+    check_identity(account: accounts.outlook) -> outlook_identity
+    check_identity(account: accounts.work_gmail) -> work_gmail_identity
+    check_identity(account: accounts.personal_gmail) -> personal_gmail_identity
+  join
+
+  on failure
+    route activity_failed(status: "failed", phase: "identity_activity", summary: "an identity-check activity failed after retries", accounts_checked: 0, accounts_synchronized: 0, discrepancies: 0, backup_snapshot: "")
+
+step assess_identity_gate
+  assess_identities(outlook: outlook_identity, work_gmail: work_gmail_identity, personal_gmail: personal_gmail_identity) -> identity_assessment
+
+  on failure
+    route activity_failed(status: "failed", phase: "identity_assessment_activity", summary: "the identity-assessment activity failed", accounts_checked: 3, accounts_synchronized: 0, discrepancies: 0, backup_snapshot: "")
+
+  outcome approved: when identity_assessment.ok, route synchronize_accounts
+  outcome rejected: otherwise, route summarize_identity_failure
+
+step synchronize_accounts
+  fork
+    synchronize(account: accounts.outlook, identity: outlook_identity) -> outlook_sync
+    synchronize(account: accounts.work_gmail, identity: work_gmail_identity) -> work_gmail_sync
+    synchronize(account: accounts.personal_gmail, identity: personal_gmail_identity) -> personal_gmail_sync
+  join
+
+  on failure
+    route activity_failed(status: "failed", phase: "synchronization_activity", summary: "one or more synchronization activities failed after retries", accounts_checked: 3, accounts_synchronized: 0, discrepancies: 0, backup_snapshot: "")
+
+step reconcile_accounts
+  reconcile(outlook: outlook_sync, work_gmail: work_gmail_sync, personal_gmail: personal_gmail_sync) -> reconciliation
+
+  on failure
+    route activity_failed(status: "failed", phase: "reconciliation_activity", summary: "the reconciliation activity failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: 0, backup_snapshot: "")
+
+  outcome reconciled: when reconciliation.ok, route verify_archive_integrity
+  outcome discrepant: otherwise, route summarize_reconciliation_failure
+
+step verify_archive_integrity
+  verify_integrity(reconciliation: reconciliation) -> integrity
+
+  on failure
+    route activity_failed(status: "failed", phase: "integrity_activity", summary: "the integrity-verification activity failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: reconciliation.discrepancies, backup_snapshot: "")
+
+  outcome valid: when integrity.ok, route backup_archive
+  outcome invalid: otherwise, route summarize_integrity_failure
+
+step backup_archive
+  create_backup(integrity: integrity) -> backup
+
+  on failure
+    route activity_failed(status: "failed", phase: "backup_activity", summary: "the backup activity failed after retries", accounts_checked: 3, accounts_synchronized: 3, discrepancies: reconciliation.discrepancies, backup_snapshot: "")
+
+  outcome stored: when backup.ok and backup.verified, route summarize_completion
+  outcome not_stored: otherwise, route summarize_backup_failure
+
+step summarize_completion
+  summarize_success(outlook: outlook_sync, work_gmail: work_gmail_sync, personal_gmail: personal_gmail_sync, reconciliation: reconciliation, integrity: integrity, backup: backup) -> summary
+  route completed(summary)
+
+  on failure
+    route activity_failed(status: "failed", phase: "summary_activity", summary: "the success-summary activity failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: reconciliation.discrepancies, backup_snapshot: backup.snapshot_id)
+
+step summarize_identity_failure
+  summarize_failure(phase: "identity", reason: identity_assessment.reason) -> summary
+  route identity_rejected(summary)
+
+  on failure
+    route identity_rejected(status: "failed", phase: "identity", summary: "identity was rejected and the summary activity also failed", accounts_checked: 3, accounts_synchronized: 0, discrepancies: 0, backup_snapshot: "")
+
+step summarize_reconciliation_failure
+  summarize_failure(phase: "reconciliation", reason: reconciliation.reason) -> summary
+  route reconciliation_failed(summary)
+
+  on failure
+    route reconciliation_failed(status: "failed", phase: "reconciliation", summary: "reconciliation failed and the summary activity also failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: reconciliation.discrepancies, backup_snapshot: "")
+
+step summarize_integrity_failure
+  summarize_failure(phase: "integrity", reason: integrity.reason) -> summary
+  route integrity_failed(summary)
+
+  on failure
+    route integrity_failed(status: "failed", phase: "integrity", summary: "integrity verification failed and the summary activity also failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: integrity.invalid_records, backup_snapshot: "")
+
+step summarize_backup_failure
+  summarize_failure(phase: "backup", reason: backup.reason) -> summary
+  route backup_failed(summary)
+
+  on failure
+    route backup_failed(status: "failed", phase: "backup", summary: "backup failed and the summary activity also failed", accounts_checked: 3, accounts_synchronized: 3, discrepancies: reconciliation.discrepancies, backup_snapshot: backup.snapshot_id)

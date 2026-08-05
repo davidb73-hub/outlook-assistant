@@ -210,6 +210,28 @@ class BackupManager {
       recursive: true,
       mode: 0o700,
     });
+    // Remote Restic repositories are not filesystem paths. In particular,
+    // path.join("rclone:...") and fs.access() would inspect a meaningless local
+    // filename. Ask Restic itself whether the remote repository is initialised.
+    // A failed remote probe is ambiguous: it can mean authentication, network,
+    // configuration, or repository failure. Never turn that ambiguity into an
+    // automatic `restic init`, which could target the wrong remote location.
+    if (/^rclone:/i.test(this.config.backupRepository)) {
+      try {
+        await this.runner(this.resticPath, ['cat', 'config'], {
+          cwd: this.config.root,
+          env: this.resticEnvironment(password),
+        });
+        return false;
+      } catch (error) {
+        const failure = new Error(
+          'Remote backup repository could not be verified; refusing automatic initialisation. Use a separately reviewed, explicit repository-initialisation workflow.',
+          { cause: error }
+        );
+        failure.code = 'BACKUP_REMOTE_REPOSITORY_UNVERIFIED';
+        throw failure;
+      }
+    }
     const configPath = path.join(this.config.backupRepository, 'config');
     try {
       await fs.access(configPath);
