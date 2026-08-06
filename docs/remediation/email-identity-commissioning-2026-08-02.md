@@ -6,6 +6,11 @@
 **Privacy rule:** this report intentionally contains no mailbox addresses, tokens,
 message identifiers, subjects, bodies, or attachment names.
 
+> **6 August status:** the plan and evidence described below expired after 24
+> hours. Digest `1de8b927…` is historical evidence and must not be approved or
+> applied. Follow `docs/remediation/aion-disposable-commissioning-2026-08-06.md`
+> for the current controlled-window, fresh-backup, and fresh-plan gates.
+
 ## Plain-language verdict
 
 The recovery gate now passes, and a privacy-safe live Gmail profile audit proved

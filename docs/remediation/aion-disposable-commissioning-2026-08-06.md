@@ -139,6 +139,48 @@ separate services. Commissioning now requires a controlled window in which all
 archive consumers are paused and zero open handles are proved. The code also
 fails closed when any external database handle is present.
 
+## Fresh post-remediation Aion execution
+
+The locally committed safety correction (`56b12b7`) was commissioned again on
+6 August without opening the live database or contacting a provider. The Aion
+CLI and running server binary were byte-identical version 0.11.0 builds. The
+clone worker passed locked Rust tests, strict Clippy, formatting, compiled AWL
+contract checks, and the Node integration test. The six-step AWL document
+checked cleanly and deployed at content hash `cde39e5…`; it was already the
+active version, so deployment loaded and routed nothing new.
+
+The observed positive run recorded:
+
+- workflow ID `9898b9bb-32c6-4ae6-ba3d-5b87dae0df6c`;
+- run ID `210745b9-3fb8-4a1c-b690-f181ab3a4caf`;
+- 21 durable events and six activities, all completed on attempt one;
+- 12 synthetic fixture messages and 11 blobs;
+- two quarantined duplicates, one canonical move, and a verified second-run
+  no-op;
+- three reconciled accounts, nine inventory items, zero differences, clean
+  integrity, foreign keys, and FTS;
+- two local encrypted Restic snapshots with deduplication observed; and
+- an exact restore with matching database/counts and all 11 blobs verified.
+
+The final outcome was `commissioned_disposable`. The retained owner-only state
+receipt is under
+`/private/tmp/email-archive-aion-commissioning/codex-commissioning-20260806-0230/`
+with SHA-256 `3a05bf1b…`. Its before/after fingerprint proves the exact live
+database, WAL, and SHM metadata present at 12:29 AEST remained unchanged across
+the run; `live_email_retrieved` is false.
+
+A separate negative Aion run, workflow ID
+`9f171fcf-0074-4ee4-a325-b6fabd5265e2`, supplied a non-authorized confirmation.
+The first activity failed terminally, the workflow recorded the expected
+`blocked_unverified` failure, and no disposable session directory was created.
+The dedicated worker was then stopped and Aion reported zero connected workers
+on its queue.
+
+The SHM metadata had changed again at 12:18 AEST before this run. That does not
+invalidate the run's exact before/after proof, but it confirms that external
+archive consumers remain active outside the controlled commissioning window.
+No sidecar was removed and no live database handle remained open at shutdown.
+
 ## Remaining approval gates
 
 1. ~~Decide how the newly created empty SQLite sidecars should be handled.~~

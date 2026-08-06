@@ -2,7 +2,7 @@
 
 **Status:** Approved for implementation on 2026-07-18  
 **Depends on:** `PRODUCT.md`, `ACCEPTANCE.md`, and the approved replacement `AGENTS.md`  
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-06
 
 ## Current execution status
 
@@ -29,14 +29,21 @@
   backlog, and the second invocation was a verified no-op. That rehearsal
   proved the algorithm. A fresh schema-preserving production snapshot
   `eeb38ba6…` then restored exactly with live schema 7 unchanged. The immutable
-  final live plan (`1de8b927…`) was generated read-only and that exact plan
-  passed dry-run and apply rehearsal on the restored clone: 48,541 planned
-  changes, zero overlap, unchanged durable counts, integrity/FTS/foreign keys
-  passed, and the second invocation was a no-op. The next gate is explicit
-  owner approval of that exact digest; no live repair has run.
+  live plan (`1de8b927…`) generated on 2 August passed dry-run and apply
+  rehearsal on the restored clone: 48,541 planned changes, zero overlap,
+  unchanged durable counts, integrity/FTS/foreign keys passed, and the second
+  invocation was a no-op. That 24-hour plan and its evidence have now expired;
+  they are historical proof only and must not be approved or applied. A fresh
+  backup, provider inventory, exact plan, and clone rehearsal are required.
+  No live repair has run.
 - Stage 5: **paused and persistently disabled in launchd**. The plist is
   preserved. One stale ingestion-run row remains `running` and must be recovered
-  through the tested transition before any reviewed resume.
+  through the tested transition before any reviewed resume. Separate
+  Command Centre/Hannibal readers were observed holding the archive and a new
+  WAL/SHM pair appeared after the first owner-authorized sidecar cleanup. Live
+  commissioning therefore also requires a controlled window with every archive
+  consumer paused, zero open handles proved, and separately authorized handling
+  of the exact new sidecar pair.
 - Stage 6: fresh whole-tree source snapshot `8c74e8fa…` and schema-preserving
   archive snapshot `eeb38ba6…` were restored to new directories with matching
   manifests, hashes, modes, counts, integrity, FTS, and all 35,396 blob hashes.
@@ -48,8 +55,13 @@
   operator action.
 - Stage 7: **not accepted**. Current static, full-test, archive-test,
   clean-install, audit, secret-scan, formatting, lint, and package-boundary
-  gates pass. Live apply/reconciliation/post-repair restore, controlled timing,
-  deletion/move, sleep/restart, and 72-hour/288-cycle gates remain pending.
+  gates pass. On 6 August, the committed clone-only Aion worker was checked,
+  deployed at the same source hash, and observed through a fresh six-activity
+  disposable run: repair rehearsal, three-account reconciliation, backup, and
+  restore all passed with zero differences and no live email retrieval or live
+  archive change. Live apply/reconciliation/post-repair restore, controlled
+  timing, deletion/move, sleep/restart, and 72-hour/288-cycle gates remain
+  pending.
 
 Downstream execution remains disabled for Phase 1. The Command Centre inbox
 path is confirmed, but its actual receipt, manifest-digest, and raw-hash

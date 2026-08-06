@@ -220,6 +220,22 @@ Verified in namespace `Practice` on 6 August 2026:
 - Safety: the Aion run retrieved no live email and did not change the live
   database or its post-diagnostic filesystem fingerprint
 
+Repeated after the immutable-read safety correction on 6 August 2026:
+
+- Workflow ID: `9898b9bb-32c6-4ae6-ba3d-5b87dae0df6c`
+- Run ID: `210745b9-3fb8-4a1c-b690-f181ab3a4caf`
+- Deployed source hash: `cde39e5deea6cf91c1eaa1fc6f975e84cd5b6cc6a2d7eeb79ff0d3b20ccd4f39`
+- Status: `Completed`; 21 durable events
+- Activities: six completed on their first attempts, zero failed
+- Result: repair rehearsal, three-account zero-difference reconciliation,
+  deduplicated backup, and exact restore all verified
+- Safety: the live database and existing sidecar fingerprint was unchanged
+  through the run; no live email was retrieved
+- Shutdown: the dedicated worker was stopped and availability returned to zero
+
+A negative run with a non-authorized confirmation failed at its first activity
+and created no disposable directory.
+
 The full evidence and the separate diagnostic-sidecar finding are recorded in
 `docs/remediation/aion-disposable-commissioning-2026-08-06.md`.
 
