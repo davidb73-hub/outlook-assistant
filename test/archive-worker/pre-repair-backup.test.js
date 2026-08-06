@@ -180,7 +180,7 @@ describe('schema-preserving pre-repair encrypted backup', () => {
         restore: expect.objectContaining({
           snapshotId: 'schema7-snapshot-0001',
           restoredSchemaVersion: 7,
-          disposableMigrationRecognizedThrough: 11,
+          disposableMigrationRecognizedThrough: 12,
           ok: true,
         }),
       })

@@ -100,6 +100,7 @@ async function install({
   home = os.homedir(),
   nodePath = null,
   repoRoot = path.resolve(__dirname, '..'),
+  launchctlRunner = runLaunchctl,
 } = {}) {
   const launchAgents = path.join(home, 'Library', 'LaunchAgents');
   const plistPath = path.join(launchAgents, `${LABEL}.plist`);
@@ -121,9 +122,14 @@ async function install({
     { mode: 0o600 }
   );
   const domain = `gui/${process.getuid()}`;
-  await runLaunchctl(['bootout', domain, plistPath], { allowFailure: true });
-  await runLaunchctl(['bootstrap', domain, plistPath]);
-  await runLaunchctl(['enable', `${domain}/${LABEL}`]);
+  await launchctlRunner(['bootout', domain, plistPath], {
+    allowFailure: true,
+  });
+  // A deliberately paused service remains in launchd's persistent disabled
+  // map after bootout. Clear that state before bootstrap; otherwise launchd
+  // rejects the valid plist with an opaque input/output error.
+  await launchctlRunner(['enable', `${domain}/${LABEL}`]);
+  await launchctlRunner(['bootstrap', domain, plistPath]);
   return { label: LABEL, plistPath, intervalMinutes: 15 };
 }
 

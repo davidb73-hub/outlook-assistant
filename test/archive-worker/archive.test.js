@@ -101,7 +101,7 @@ describe('private archive foundation', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all()
         .map((row) => row.version)
-    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
   test('routine status omits raw run details, provider IDs, and error text', () => {
@@ -313,6 +313,155 @@ describe('private archive foundation', () => {
     expect(blobCount).toBe(1);
   });
 
+  test('retires provider-absent incomplete metadata without deleting content', async () => {
+    const raw = Buffer.from('authoritative attachment manifest fixture');
+    const currentAttachment = {
+      providerAttachmentId: 'attachment-current',
+      fileName: 'current.pdf',
+      mediaType: 'application/pdf',
+      size: 7,
+    };
+    const staleAttachment = {
+      providerAttachmentId: 'attachment-stale',
+      fileName: 'stale.pdf',
+      mediaType: 'application/pdf',
+      size: 9,
+    };
+    const first = await service.stageMessage(
+      'vitasci-outlook',
+      fixtureMessage({ attachments: [currentAttachment, staleAttachment] }),
+      raw
+    );
+    await service.completeAttachment(
+      first.id,
+      currentAttachment.providerAttachmentId,
+      Buffer.from('current'),
+      currentAttachment.mediaType
+    );
+    database.markAttachmentFailure(
+      first.id,
+      staleAttachment.providerAttachmentId,
+      'synthetic interrupted download'
+    );
+
+    const refreshed = await service.stageMessage(
+      'vitasci-outlook',
+      fixtureMessage({ attachments: [currentAttachment] }),
+      raw
+    );
+    expect(refreshed.archive_state).toBe('archived_complete');
+    expect(refreshed.attachments).toEqual([
+      expect.objectContaining({
+        provider_attachment_id: currentAttachment.providerAttachmentId,
+        archive_state: 'complete',
+      }),
+    ]);
+    const retired = database.db
+      .prepare(
+        `SELECT archive_state, blob_hash, current_eligible, retired_at,
+                retirement_reason, retirement_evidence_digest
+         FROM attachments
+         WHERE message_id = ? AND provider_attachment_id = ?`
+      )
+      .get(first.id, staleAttachment.providerAttachmentId);
+    expect(retired).toEqual(
+      expect.objectContaining({
+        archive_state: 'retryable_error',
+        blob_hash: null,
+        current_eligible: 0,
+        retirement_reason: 'absent_from_authoritative_provider_manifest',
+      })
+    );
+    expect(retired.retired_at).toBeTruthy();
+    expect(retired.retirement_evidence_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(database.pendingAttachments('vitasci-outlook')).toHaveLength(0);
+    expect(
+      database.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM message_events
+           WHERE message_id = ? AND event_type = 'attachment_manifest_reconciled'`
+        )
+        .get(first.id).count
+    ).toBe(1);
+
+    await service.stageMessage(
+      'vitasci-outlook',
+      fixtureMessage({ attachments: [currentAttachment] }),
+      raw
+    );
+    expect(
+      database.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM message_events
+           WHERE message_id = ? AND event_type = 'attachment_manifest_reconciled'`
+        )
+        .get(first.id).count
+    ).toBe(1);
+
+    const reappeared = await service.stageMessage(
+      'vitasci-outlook',
+      fixtureMessage({ attachments: [currentAttachment, staleAttachment] }),
+      raw
+    );
+    expect(reappeared.archive_state).toBe('archived_pending_attachments');
+    expect(reappeared.attachments).toHaveLength(2);
+    expect(
+      database.db
+        .prepare(
+          `SELECT current_eligible, retired_at, retirement_reason,
+                  retirement_evidence_digest
+           FROM attachments
+           WHERE message_id = ? AND provider_attachment_id = ?`
+        )
+        .get(first.id, staleAttachment.providerAttachmentId)
+    ).toEqual({
+      current_eligible: 1,
+      retired_at: null,
+      retirement_reason: null,
+      retirement_evidence_digest: null,
+    });
+  });
+
+  test('refuses to retire an incomplete attachment that references content', async () => {
+    const attachment = fixtureMessage().attachments[0];
+    const archived = await service.stageMessage(
+      'vitasci-outlook',
+      fixtureMessage(),
+      Buffer.from('raw fixture')
+    );
+    const content = Buffer.from('preserved attachment content');
+    const blobHash = sha256(content);
+    database.registerBlob({
+      hash: blobHash,
+      kind: 'attachment',
+      relativePath: `attachments/${blobHash}`,
+      size: content.length,
+      mediaType: 'application/pdf',
+    });
+    database.db
+      .prepare(
+        `UPDATE attachments SET blob_hash = ?
+         WHERE message_id = ? AND provider_attachment_id = ?`
+      )
+      .run(blobHash, archived.id, attachment.providerAttachmentId);
+
+    expect(() =>
+      database.stageMessage(
+        'vitasci-outlook',
+        fixtureMessage({ attachments: [], hasAttachments: false }),
+        null
+      )
+    ).toThrow('ATTACHMENT_RETIREMENT_CONTENT_PRESENT');
+    expect(
+      database.db
+        .prepare(
+          `SELECT current_eligible, blob_hash FROM attachments
+           WHERE message_id = ? AND provider_attachment_id = ?`
+        )
+        .get(archived.id, attachment.providerAttachmentId)
+    ).toEqual({ current_eligible: 1, blob_hash: blobHash });
+  });
+
   test('deduplicates identical bytes across raw-message and attachment roles', async () => {
     const shared = Buffer.from('identical cross-role bytes');
     const archived = await service.stageMessage(
@@ -465,7 +614,7 @@ describe('private archive foundation', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all()
         .map((row) => row.version)
-    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     upgraded.close();
   });
 

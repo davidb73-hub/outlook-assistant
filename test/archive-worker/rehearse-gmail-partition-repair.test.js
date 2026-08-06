@@ -14,6 +14,7 @@ const {
   collectGmailInventories,
   collectProviderInventory,
   ftsAccountConsistency,
+  openAnchorDatabase,
   openCloneDatabase,
   rawMessageLoader,
   readExactLivePlanEnvelope,
@@ -216,6 +217,37 @@ describe('Gmail partition clone rehearsal operator surface', () => {
     expect(fs.existsSync(`${databasePath}-shm`)).toBe(false);
   });
 
+  test('opens a WAL-mode anchor immutably without creating sidecars', () => {
+    const databasePath = path.join(root, 'immutable-anchor.sqlite3');
+    const writable = new SqliteDatabase(databasePath);
+    writable.pragma('journal_mode = WAL');
+    writable.exec('CREATE TABLE fixture(value TEXT)');
+    writable.prepare('INSERT INTO fixture(value) VALUES (?)').run('safe');
+    writable.pragma('wal_checkpoint(TRUNCATE)');
+    writable.close();
+    for (const suffix of ['-wal', '-shm']) {
+      fs.rmSync(`${databasePath}${suffix}`, { force: true });
+    }
+    const before = fs.statSync(databasePath, { bigint: true });
+
+    const database = openAnchorDatabase(databasePath);
+    expect(database.prepare('SELECT value FROM fixture').get().value).toBe(
+      'safe'
+    );
+    expect(() =>
+      database.prepare('INSERT INTO fixture(value) VALUES (?)').run('unsafe')
+    ).toThrow();
+    database.close();
+
+    const after = fs.statSync(databasePath, { bigint: true });
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeNs).toBe(before.mtimeNs);
+    expect(fs.existsSync(`${databasePath}-wal`)).toBe(false);
+    expect(fs.existsSync(`${databasePath}-shm`)).toBe(false);
+  });
+
   test('uses writable WAL settings only for an explicitly confirmed apply path', () => {
     const opened = [];
     class FakeDatabase {
@@ -278,6 +310,33 @@ describe('Gmail partition clone rehearsal operator surface', () => {
       readVerifiedAnchorManifest(anchorPath, manifestPath)
     ).rejects.toThrow('GMAIL_REHEARSAL_ANCHOR_DATABASE_UNSTABLE');
   });
+
+  test.each(['-wal', '-shm'])(
+    'refuses an anchor database with an empty %s sidecar',
+    async (suffix) => {
+      const anchorPath = path.join(
+        root,
+        `anchor-with-${suffix.slice(1)}.sqlite3`
+      );
+      const manifestPath = `${anchorPath}.manifest.json`;
+      const bytes = Buffer.from('immutable synthetic anchor');
+      fs.writeFileSync(anchorPath, bytes);
+      fs.writeFileSync(`${anchorPath}${suffix}`, '');
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          databaseSha256: crypto
+            .createHash('sha256')
+            .update(bytes)
+            .digest('hex'),
+        })
+      );
+
+      await expect(
+        readVerifiedAnchorManifest(anchorPath, manifestPath)
+      ).rejects.toThrow('GMAIL_REHEARSAL_ANCHOR_DATABASE_UNSTABLE');
+    }
+  );
 
   test('creates a new Outlook verifier for each independent proof', async () => {
     const account = {

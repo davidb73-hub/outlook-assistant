@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
@@ -227,6 +228,7 @@ class ArchiveDatabase {
       const messageId = result.id;
       this.replaceRecipients(messageId, message.recipients || []);
       this.replaceLocations(messageId, message.locations || [], timestamp);
+      this.retireAbsentIncompleteAttachments(messageId, attachments, timestamp);
       this.upsertAttachments(messageId, attachments, timestamp);
       this.refreshMessageState(messageId);
       this.refreshFts(messageId, accountId, message);
@@ -295,6 +297,10 @@ class ArchiveDatabase {
          size = excluded.size,
          content_id = excluded.content_id,
          is_inline = excluded.is_inline,
+         current_eligible = 1,
+         retired_at = NULL,
+         retirement_reason = NULL,
+         retirement_evidence_digest = NULL,
          updated_at = excluded.updated_at`
     );
     for (const attachment of attachments) {
@@ -309,6 +315,93 @@ class ArchiveDatabase {
         timestamp
       );
     }
+  }
+
+  retireAbsentIncompleteAttachments(messageId, attachments, timestamp) {
+    const providerAttachmentIds = attachments.map(
+      (attachment) => attachment.providerAttachmentId
+    );
+    if (
+      providerAttachmentIds.some(
+        (providerAttachmentId) =>
+          typeof providerAttachmentId !== 'string' || !providerAttachmentId
+      )
+    ) {
+      throw new Error('Provider attachment IDs must be non-empty strings');
+    }
+    const currentIds = new Set(providerAttachmentIds);
+    if (currentIds.size !== providerAttachmentIds.length) {
+      throw new Error('Provider attachment manifest contains duplicate IDs');
+    }
+    const absent = this.db
+      .prepare(
+        `SELECT id, provider_attachment_id, archive_state, blob_hash
+         FROM attachments
+         WHERE message_id = ?
+           AND current_eligible = 1
+           AND archive_state != 'complete'
+         ORDER BY provider_attachment_id`
+      )
+      .all(messageId)
+      .filter((row) => !currentIds.has(row.provider_attachment_id));
+    if (absent.length === 0) return 0;
+    if (absent.some((row) => row.blob_hash !== null)) {
+      throw new Error(
+        'ATTACHMENT_RETIREMENT_CONTENT_PRESENT: refusing to retire attachment content'
+      );
+    }
+    const evidenceDigest = crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          schema: 'authoritative-attachment-manifest.v1',
+          messageId,
+          providerAttachmentIds: [...currentIds].sort(),
+        })
+      )
+      .digest('hex');
+    const retire = this.db.prepare(
+      `UPDATE attachments
+       SET current_eligible = 0,
+           retired_at = ?,
+           retirement_reason = 'absent_from_authoritative_provider_manifest',
+           retirement_evidence_digest = ?,
+           updated_at = ?
+       WHERE id = ?
+         AND current_eligible = 1
+         AND archive_state != 'complete'
+         AND blob_hash IS NULL`
+    );
+    let retired = 0;
+    for (const row of absent) {
+      retired += retire.run(
+        timestamp,
+        evidenceDigest,
+        timestamp,
+        row.id
+      ).changes;
+    }
+    if (retired !== absent.length) {
+      throw new Error(
+        'ATTACHMENT_RETIREMENT_PRECONDITION_CHANGED: attachment state changed during reconciliation'
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT INTO message_events(
+           message_id, event_type, occurred_at, details_json
+         ) VALUES (?, 'attachment_manifest_reconciled', ?, ?)`
+      )
+      .run(
+        messageId,
+        timestamp,
+        json({
+          retiredIncompleteAttachments: retired,
+          reason: 'absent_from_authoritative_provider_manifest',
+          evidenceDigest,
+        })
+      );
+    return retired;
   }
 
   refreshFts(messageId, accountId, message) {
@@ -506,7 +599,9 @@ class ArchiveDatabase {
     const pending = this.db
       .prepare(
         `SELECT COUNT(*) AS count FROM attachments
-         WHERE message_id = ? AND archive_state != 'complete'`
+         WHERE message_id = ?
+           AND current_eligible = 1
+           AND archive_state != 'complete'`
       )
       .get(messageId).count;
     const archiveState =
@@ -607,6 +702,7 @@ class ArchiveDatabase {
              ON account.id = m.account_id AND account.enabled = 1
            LEFT JOIN attachment_security s ON s.attachment_id = a.id
           WHERE a.archive_state = 'complete'
+            AND a.current_eligible = 1
             AND a.blob_hash IS NOT NULL
             AND (s.attachment_id IS NULL
                  OR s.status NOT IN ('safe', 'quarantined', 'blocked'))
@@ -636,7 +732,9 @@ class ArchiveDatabase {
       .prepare(
         `SELECT COUNT(*) AS count FROM attachments a
        LEFT JOIN attachment_security s ON s.attachment_id = a.id
-       WHERE a.message_id = ? AND (a.archive_state != 'complete' OR s.status != 'safe')`
+       WHERE a.message_id = ?
+         AND a.current_eligible = 1
+         AND (a.archive_state != 'complete' OR s.status != 'safe')`
       )
       .get(messageId).count;
     if (unsafe > 0) {
@@ -751,7 +849,9 @@ class ArchiveDatabase {
       .prepare(
         `SELECT provider_attachment_id, file_name, media_type, size, content_id,
                 is_inline, blob_hash, archive_state, last_error
-         FROM attachments WHERE message_id = ? ORDER BY provider_attachment_id`
+         FROM attachments
+         WHERE message_id = ? AND current_eligible = 1
+         ORDER BY provider_attachment_id`
       )
       .all(messageId);
     return message;
@@ -1140,7 +1240,9 @@ class ArchiveDatabase {
         `SELECT a.*, m.provider_message_id, m.account_id
          FROM attachments a
          JOIN messages m ON m.id = a.message_id
-         WHERE m.account_id = ? AND a.archive_state != 'complete'
+         WHERE m.account_id = ?
+           AND a.current_eligible = 1
+           AND a.archive_state != 'complete'
          ORDER BY a.updated_at, a.id
          LIMIT ?`
       )

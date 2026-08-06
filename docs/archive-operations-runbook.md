@@ -4,19 +4,21 @@
 **Scope:** deterministic Phase 1 archive only  
 **Live archive:** `/Users/davidbasseal/Library/Application Support/Email Assistant Archive/`
 
-## Current safety state — 2 August 2026
+## Current safety state — 6 August 2026
 
-The archive LaunchAgent is persistently disabled. Leave it disabled. The plist
-has been preserved, but `launchctl` has no active service and there is no worker
-or lock. One final `gmail-ablative` run row still says `running`; do not edit it
-by hand. The reviewed recovery path will mark it interrupted immediately before
-an approved live operation.
+The controlled live repair, all-account reconciliation, encrypted backup, and
+exact restore have passed. The two paused archive readers are restored and the
+archive LaunchAgent is enabled at a 15-minute interval. Its first RunAtLoad
+cycle completed with all three identities verified, zero errors, and downstream
+delivery still gated. The automated archive acceptance gate passes.
 
-Do not run `archive:sync`, `archive:reconcile`, the schedule installer, or a
-manual `launchctl enable` yet. Before owner approval, safe work is limited to
-read-only identity/evidence checks, the dedicated schema-preserving backup and
-exact restore, a read-only live plan, and a new-directory rehearsal of that
-exact plan. The historical Gmail whole-account swap must not be run.
+Do not rerun the historical Gmail whole-account swap or the one-time partition
+repair. Phase 1 is not yet signed off: the new clean unattended window began on
+6 August and still requires 72 elapsed hours plus 288 completed cycles. The
+separate 20-message controlled latency test also requires owner-created live
+mail and has not been performed. Check `archive:acceptance-status`; never infer
+those elapsed or owner-controlled results from the successful commissioning
+cycle.
 
 ## What the system does
 
@@ -175,6 +177,30 @@ visible in `scheduled.jsonl` and is retried on the next 15-minute cycle. Gmail
 authentication failures and other non-throttling errors remain `failed` and
 produce a failing service exit code.
 
+### Provider-absent incomplete attachments
+
+A full provider message response is authoritative for its current attachment
+manifest. Migration 12 adds a reversible lifecycle for old incomplete
+attachment metadata that is absent from a refreshed manifest. The worker never
+deletes that row or marks it complete. It retains the metadata with
+`current_eligible = 0`, a retirement timestamp/reason, a manifest digest, and a
+content-free message event. Operational pending, security, and delivery queries
+ignore the retired row. If the provider later reports the same attachment ID,
+normal staging clears the retirement fields and retries it.
+
+Retirement fails closed if an incomplete row has a blob hash. Completed
+attachments and all content-addressed blobs are always preserved. A large
+backlog may be rehearsed with a temporary higher retry limit:
+
+```bash
+EMAIL_ARCHIVE_ATTACHMENT_RETRY_BATCH_SIZE=1000 npm run archive:sync
+```
+
+Use that override only after identity checks and on a disposable archive clone
+first. Verify the exact retired-row count, zero affected blobs/security rows,
+zero pending messages, FTS, foreign keys, database integrity, and a second
+idempotent cycle before applying the same read-only-provider sync live.
+
 ## Authentication recovery
 
 Outlook uses the repository's existing delegated read token. Before folders,
@@ -204,10 +230,10 @@ reauthorisation resumes without intentionally starting over.
 
 ## Scheduling
 
-The commands below describe the normal mechanism, but are currently blocked by
-the safety state above. Resuming is a deliberate two-part action: first remove
-launchd's persistent disabled flag, then run the reviewed installer. Do neither
-until the live repair, reconciliation, backup, restore, and identity gates pass.
+This is the active production mechanism. After a deliberate maintenance pause,
+use the reviewed installer to clear launchd's persistent disabled flag before
+bootstrapping the service. Do not resume until any maintenance-specific repair,
+reconciliation, backup, restore, and identity gates pass.
 
 Install or refresh the 15-minute user scheduler:
 
@@ -387,9 +413,9 @@ recognition only on a disposable copied database. The retained restore and live
 database remain schema 7 and manifest-identical. The command refuses to
 overwrite an existing receipt or proceed while a WAL or SHM sidecar exists.
 
-The restore contains `migration-recognition.sqlite3`, a disposable schema-11
-copy of the retained schema-7 database. To make the self-contained rehearsal
-root, copy that file and the retained manifest inside the same restored root;
+The restore contains `migration-recognition.sqlite3`, a disposable copy at the
+current forward schema. To make the self-contained rehearsal root, copy that
+file and the retained manifest inside the same restored root;
 do not hard-link them and do not point at live content:
 
 ```bash
@@ -453,9 +479,11 @@ npm run archive:rehearse-gmail-repair -- \
 The apply rehearsal must bind to the exact live plan and precondition, recheck
 all three identities, recollect both Gmail inventories, verify raw MIME, FTS,
 counts, child rows, blobs, integrity and foreign keys, and prove a second
-invocation is a no-op. A removal, ownership change, overlap, or collision stops
-the rehearsal. Do not approve a plan produced by an earlier rehearsal: its
-generation time gives it a different digest.
+invocation is a no-op. It opens the verified anchor through the strict immutable
+reader and refuses either WAL or SHM sidecar, including an empty sidecar, so the
+same anchor remains admissible to live preflight. A removal, ownership change,
+overlap, or collision stops the rehearsal. Do not approve a plan produced by an
+earlier rehearsal: its generation time gives it a different digest.
 
 ### 4. Record owner approval and apply once
 

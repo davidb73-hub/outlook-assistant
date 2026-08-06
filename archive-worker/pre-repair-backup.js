@@ -4,6 +4,7 @@ const fsPromises = require('fs/promises');
 const path = require('path');
 const { ImmutableSqliteDatabase } = require('./immutable-sqlite');
 const { ArchiveDatabase } = require('./database');
+const { MIGRATIONS } = require('./migrations');
 const { BackupManager, fileHash } = require('./backup');
 const { WorkerLock } = require('./lock');
 const { inspectFtsConsistency } = require('./fts-index');
@@ -22,6 +23,7 @@ const PRE_REPAIR_BACKUP_CONFIRMATION =
 const REQUIRED_PRE_REPAIR_SCHEMA_VERSION = 7;
 const PRE_REPAIR_RESTORE_RECEIPT_KIND =
   'email-assistant-pre-repair-restore-receipt';
+const CURRENT_ARCHIVE_SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 function sha256Json(value) {
   return crypto
@@ -63,6 +65,22 @@ function rawBackupAdapter(database) {
         )
         .all(),
   };
+}
+
+function currentArchiveSchemaVersion(database) {
+  const applied = database
+    .prepare('SELECT version, name FROM schema_migrations ORDER BY version')
+    .all();
+  if (
+    applied.length !== CURRENT_ARCHIVE_SCHEMA_VERSION ||
+    applied.some((row, index) => {
+      const migration = MIGRATIONS[index];
+      return row.version !== migration.version || row.name !== migration.name;
+    })
+  ) {
+    throw backupError('PRE_REPAIR_BACKUP_RESTORE_MIGRATION_RECOGNITION_FAILED');
+  }
+  return applied.at(-1)?.version || 0;
 }
 
 async function assertNewEmptyRestoreTarget(target) {
@@ -180,9 +198,9 @@ async function verifyExactPreRepairRestore({
   const migratedRestore = new ArchiveDatabaseImpl(migrationRecognitionPath);
   let migratedSchemaVersion;
   try {
-    migratedSchemaVersion = currentSchemaVersion(migratedRestore.db);
+    migratedSchemaVersion = currentArchiveSchemaVersion(migratedRestore.db);
     if (
-      migratedSchemaVersion !== 11 ||
+      migratedSchemaVersion !== CURRENT_ARCHIVE_SCHEMA_VERSION ||
       migratedRestore.db.pragma('integrity_check', { simple: true }) !== 'ok' ||
       migratedRestore.db.pragma('foreign_key_check').length !== 0
     ) {
@@ -430,11 +448,13 @@ async function createSchemaPreservingPreRepairBackup({
 }
 
 module.exports = {
+  CURRENT_ARCHIVE_SCHEMA_VERSION,
   PRE_REPAIR_BACKUP_CONFIRMATION,
   PRE_REPAIR_RESTORE_RECEIPT_KIND,
   REQUIRED_PRE_REPAIR_SCHEMA_VERSION,
   assertNewEmptyRestoreTarget,
   createSchemaPreservingPreRepairBackup,
+  currentArchiveSchemaVersion,
   rawBackupAdapter,
   sourceCounts,
   receiptDigest,

@@ -23,6 +23,7 @@ const {
 } = require('./seed-archive-identities');
 const { fileHash } = require('./backup');
 const { inspectFtsConsistency } = require('./fts-index');
+const { ImmutableSqliteDatabase } = require('./immutable-sqlite');
 
 const CLONE_REHEARSAL_CONFIRMATION = 'APPLY_TO_VERIFIED_TEMPORARY_CLONE_ONLY';
 const DEFAULT_CONTAMINATION_WINDOW = Object.freeze({
@@ -142,13 +143,16 @@ async function readVerifiedAnchorManifest(
   if (!/^[a-f0-9]{64}$/.test(manifest.databaseSha256 || '')) {
     throw rehearsalError('GMAIL_REHEARSAL_ANCHOR_MANIFEST_INVALID');
   }
-  const walPath = `${anchorDatabasePath}-wal`;
-  const wal = await fsPromises.stat(walPath).catch((error) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (wal?.size > 0) {
-    throw rehearsalError('GMAIL_REHEARSAL_ANCHOR_DATABASE_UNSTABLE');
+  for (const suffix of ['-wal', '-shm']) {
+    const sidecar = await fsPromises
+      .lstat(`${anchorDatabasePath}${suffix}`)
+      .catch((error) => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+    if (sidecar) {
+      throw rehearsalError('GMAIL_REHEARSAL_ANCHOR_DATABASE_UNSTABLE');
+    }
   }
   const before = await fsPromises.stat(anchorDatabasePath, {
     bigint: true,
@@ -184,6 +188,19 @@ function openCloneDatabase(DatabaseImpl, databasePath, applyRehearsal) {
   } else {
     database.pragma('query_only = ON');
   }
+  return database;
+}
+
+function openAnchorDatabase(
+  databasePath,
+  DatabaseImpl = ImmutableSqliteDatabase
+) {
+  const database = new DatabaseImpl(databasePath, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  database.pragma('foreign_keys = ON');
+  database.pragma('query_only = ON');
   return database;
 }
 
@@ -538,6 +555,7 @@ async function runGmailPartitionCloneRehearsal({
   confirmation = null,
   contaminationWindow = DEFAULT_CONTAMINATION_WINDOW,
   DatabaseImpl = SqliteDatabase,
+  AnchorDatabaseImpl = ImmutableSqliteDatabase,
   gmailSlotProbeFactory = null,
   gmailProviderFactory = null,
   outlookProfileProbe = null,
@@ -622,13 +640,11 @@ async function runGmailPartitionCloneRehearsal({
     clone.databasePath,
     applyRehearsal
   );
-  const anchorDatabase = new DatabaseImpl(resolvedAnchorPath, {
-    readonly: true,
-    fileMustExist: true,
-  });
+  const anchorDatabase = openAnchorDatabase(
+    resolvedAnchorPath,
+    AnchorDatabaseImpl
+  );
   try {
-    anchorDatabase.pragma('foreign_keys = ON');
-    anchorDatabase.pragma('query_only = ON');
     progress('database_integrity_started');
     if (
       database.pragma('integrity_check', { simple: true }) !== 'ok' ||
@@ -867,6 +883,7 @@ module.exports = {
   collectGmailInventories,
   collectProviderInventory,
   ftsAccountConsistency,
+  openAnchorDatabase,
   openCloneDatabase,
   rawMessageLoader,
   readExactLivePlanEnvelope,

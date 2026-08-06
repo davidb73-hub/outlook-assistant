@@ -19,6 +19,7 @@ const {
   LABEL,
   STABLE_NODE_22,
   escapeXml,
+  install,
   plist,
   preferredNodePath,
 } = require('../../scripts/install-email-archive-launchd');
@@ -162,6 +163,39 @@ describe('unattended archive operations', () => {
         jest.fn().mockRejectedValue(new Error('missing'))
       )
     ).resolves.toBe('/fallback/node');
+  });
+
+  test('enables a persistently disabled scheduler before bootstrap', async () => {
+    const repoRoot = path.join(root, 'repository');
+    await fs.mkdir(path.join(repoRoot, 'archive-worker'), { recursive: true });
+    await fs.writeFile(
+      path.join(repoRoot, 'archive-worker', 'scheduled.js'),
+      '#!/usr/bin/env node\n'
+    );
+    const launchctlRunner = jest.fn().mockResolvedValue({ code: 0 });
+
+    await expect(
+      install({
+        home: root,
+        nodePath: '/safe/node',
+        repoRoot,
+        launchctlRunner,
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({ label: LABEL, intervalMinutes: 15 })
+    );
+    const domain = `gui/${process.getuid()}`;
+    const plistPath = path.join(
+      root,
+      'Library',
+      'LaunchAgents',
+      `${LABEL}.plist`
+    );
+    expect(launchctlRunner.mock.calls).toEqual([
+      [['bootout', domain, plistPath], { allowFailure: true }],
+      [['enable', `${domain}/${LABEL}`]],
+      [['bootstrap', domain, plistPath]],
+    ]);
   });
 
   test('builds an actionable content-free macOS failure notification without a shell', async () => {

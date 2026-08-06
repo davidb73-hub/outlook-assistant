@@ -439,6 +439,28 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 12,
+    name: 'attachment-manifest-retirement-provenance',
+    // A refreshed provider message is the authoritative manifest for its
+    // current attachment occurrences. Historical incomplete rows can outlive
+    // that manifest after provider-side MIME normalisation or an interrupted
+    // early ingest. Preserve those rows and their metadata for audit instead
+    // of deleting them or falsely marking them complete.
+    sql: `
+      ALTER TABLE attachments ADD COLUMN current_eligible INTEGER NOT NULL
+        DEFAULT 1 CHECK (current_eligible IN (0, 1));
+      ALTER TABLE attachments ADD COLUMN retired_at TEXT;
+      ALTER TABLE attachments ADD COLUMN retirement_reason TEXT CHECK (
+        retirement_reason IS NULL
+        OR retirement_reason = 'absent_from_authoritative_provider_manifest'
+      );
+      ALTER TABLE attachments ADD COLUMN retirement_evidence_digest TEXT;
+
+      CREATE INDEX attachments_current_state_idx
+        ON attachments(current_eligible, archive_state, message_id);
+    `,
+  },
 ];
 
 module.exports = {
