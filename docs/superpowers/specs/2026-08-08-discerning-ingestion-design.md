@@ -168,8 +168,8 @@ At `archive-worker/sync-engine.js:148`, before `provider.fetchBundle(ref)`:
 1. Resolve the sender's class from `sender_reputation`.
 2. `trusted` / `protected` → full bundle, unchanged behaviour.
 3. `bulk` / `unknown` → metadata-only bundle. Persist with
-   `archive_state = 'archived_headers_only'`. Index subject and participants in
-   FTS; omit the body.
+   `content_depth = 'headers_only'`. Index subject and participants in FTS;
+   omit the body.
 
 ### Promotion and backfill
 
@@ -181,14 +181,32 @@ Gmail. Nothing is permanently lost — the provider still holds the originals.
 This is what makes the system learn. No training and no model weights; reputation
 is a live aggregation over behaviour that changes as the owner works.
 
-## New Archive State
+## Recording Content Depth
 
-`archived_headers_only` is added to the `messages.archive_state` CHECK constraint.
+Headers-only messages need to be distinguishable from incomplete ones. Without
+that, `archive:status` and `archive:verify` would report roughly 8,000 messages
+as permanently incomplete.
 
-Without it, `archive:status` and `archive:verify` would report roughly 8,000
-messages as permanently incomplete. Reconciliation compares provider-eligible
-against local-eligible **counts**, so provider-parity checks remain green
-(verified 2026-08-06: gmail-personal 24,282/24,282, 0 differences).
+This is recorded as a **new column**, not a new `archive_state` value:
+
+```sql
+ALTER TABLE messages ADD COLUMN content_depth TEXT NOT NULL DEFAULT 'full'
+  CHECK (content_depth IN ('full', 'headers_only'));
+```
+
+`archive_state` carries a `CHECK ... IN (...)` constraint, and SQLite cannot
+extend a CHECK constraint in place — it requires a full table rebuild. Rebuilding
+a 52,256-row table inside a 2.3 GB database, with foreign keys and an FTS index
+attached, is a materially riskier operation than adding a column. Every existing
+migration in `archive-worker/migrations.js` uses `ALTER TABLE ADD COLUMN` for
+this reason.
+
+A headers-only message therefore keeps `archive_state = 'archived_complete'`
+(it is complete *for its depth*) and carries `content_depth = 'headers_only'`.
+
+Reconciliation compares provider-eligible against local-eligible **counts**, so
+provider-parity checks remain green regardless of depth (verified 2026-08-06:
+gmail-personal 24,282/24,282, 0 differences).
 
 ## Protected Carve-Out
 
@@ -249,7 +267,8 @@ Fixture-based, temporary directories, never live mailboxes, per
 7. Promotion enqueues backfill; backfill restores the full message.
 8. Prune unlinks a blob only when no other message references the hash.
 9. Prune aborts on digest mismatch, leaving the database unchanged.
-10. `archive:status` and `archive:verify` treat `archived_headers_only` as valid.
+10. `archive:status` and `archive:verify` treat `content_depth = 'headers_only'`
+    as valid and complete, not as a pending or errored message.
 
 ## Expected Outcome
 
