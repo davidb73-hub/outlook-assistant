@@ -12,6 +12,14 @@ const {
   formatDryRunPreview,
 } = require('../utils/safety');
 const { handleGetMailTips } = require('./mail-tips');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+// Graph: inline POST up to 3 MB; larger needs an upload session (max 150 MB).
+const INLINE_LIMIT = 3 * 1024 * 1024;
+const MAX_ATTACHMENT = 150 * 1024 * 1024;
+const CHUNK = 327680 * 12; // chunks must be multiples of 320 KiB
 
 /**
  * Format comma-separated email string into Graph API recipient objects
@@ -107,7 +115,7 @@ async function handleDraft(args) {
       content: [
         {
           type: 'text',
-          text: "Action is required. Use 'create', 'update', 'send', 'delete', 'reply', 'reply-all', or 'forward'.",
+          text: "Action is required. Use 'create', 'update', 'send', 'delete', 'reply', 'reply-all', 'forward', or 'attach'.",
         },
       ],
     };
@@ -128,12 +136,14 @@ async function handleDraft(args) {
       return handleReplyDraft(args, 'createReplyAll');
     case 'forward':
       return handleForwardDraft(args);
+    case 'attach':
+      return handleAttachDraft(args);
     default:
       return {
         content: [
           {
             type: 'text',
-            text: `Invalid action '${action}'. Use 'create', 'update', 'send', 'delete', 'reply', 'reply-all', or 'forward'.`,
+            text: `Invalid action '${action}'. Use 'create', 'update', 'send', 'delete', 'reply', 'reply-all', 'forward', or 'attach'.`,
           },
         ],
       };
@@ -454,6 +464,123 @@ async function handleForwardDraft(args) {
     return formatDraftResponse(draft, 'forward draft created');
   } catch (error) {
     return handleError('creating forward draft', error);
+  }
+}
+
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+const textResult = (text) => ({ content: [{ type: 'text', text }] });
+
+async function uploadLargeAttachment(accessToken, id, name, buffer) {
+  const session = await callGraphAPI(
+    accessToken,
+    'POST',
+    `me/messages/${id}/attachments/createUploadSession`,
+    { AttachmentItem: { attachmentType: 'file', name, size: buffer.length } }
+  );
+  // The upload URL is pre-authorised; Graph rejects an Authorization header on it.
+  for (let start = 0; start < buffer.length; start += CHUNK) {
+    const end = Math.min(start + CHUNK, buffer.length);
+    const res = await fetch(session.uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(end - start),
+        'Content-Range': `bytes ${start}-${end - 1}/${buffer.length}`,
+      },
+      body: buffer.subarray(start, end),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `upload chunk ${start}-${end - 1} failed: HTTP ${res.status}`
+      );
+    }
+  }
+}
+
+/**
+ * Attach a local file to an existing draft, then read it back from the
+ * mailbox and compare SHA-256 so the caller knows the stored bytes match.
+ */
+async function handleAttachDraft(args) {
+  const { id, filePath } = args;
+  if (!id) return textResult('Draft ID (id) is required for attach.');
+  if (!filePath) return textResult('filePath is required for attach.');
+  if (!path.isAbsolute(filePath)) {
+    return textResult('filePath must be an absolute path.');
+  }
+
+  let buffer;
+  try {
+    if (!fs.statSync(filePath).isFile()) {
+      return textResult(`Not a file: ${filePath}`);
+    }
+    buffer = fs.readFileSync(filePath);
+  } catch (error) {
+    return textResult(`Cannot read ${filePath}: ${error.message}`);
+  }
+  if (buffer.length === 0) return textResult(`File is empty: ${filePath}`);
+  if (buffer.length > MAX_ATTACHMENT) {
+    return textResult(`File is over the 150 MB Outlook limit: ${filePath}`);
+  }
+
+  const rateLimitError = checkRateLimit('draft');
+  if (rateLimitError) return rateLimitError;
+
+  const name = path.basename(filePath);
+  const localHash = sha256(buffer);
+
+  try {
+    const accessToken = await ensureAuthenticated();
+    if (buffer.length < INLINE_LIMIT) {
+      await callGraphAPI(accessToken, 'POST', `me/messages/${id}/attachments`, {
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name,
+        contentBytes: buffer.toString('base64'),
+      });
+    } else {
+      await uploadLargeAttachment(accessToken, id, name, buffer);
+    }
+
+    // Read back every attachment with this name and hash its stored bytes.
+    const list = await callGraphAPI(
+      accessToken,
+      'GET',
+      `me/messages/${id}/attachments`,
+      null,
+      { $select: 'id,name,size' }
+    );
+    const sameName = (list.value || []).filter((a) => a.name === name);
+    let match = null;
+    for (const att of sameName) {
+      const full = await callGraphAPI(
+        accessToken,
+        'GET',
+        `me/messages/${id}/attachments/${att.id}`
+      );
+      if (
+        full.contentBytes &&
+        sha256(Buffer.from(full.contentBytes, 'base64')) === localHash
+      ) {
+        match = att;
+        break;
+      }
+    }
+
+    let text = `**File**: ${name}\n**Size**: ${buffer.length} bytes\n**Local SHA-256**: ${localHash}\n`;
+    if (match) {
+      text = `Attachment added and VERIFIED in mailbox.\n\n${text}**Mailbox SHA-256**: ${localHash} (match)\n**Attachment ID**: \`${match.id}\`\n`;
+    } else {
+      text = `Attachment upload finished but NOT VERIFIED: no stored copy of ${name} on draft \`${id}\` matches the local SHA-256. Do not rely on the mailbox copy.\n\n${text}`;
+    }
+    return {
+      content: [{ type: 'text', text }],
+      _meta: {
+        verified: Boolean(match),
+        sha256: localHash,
+        attachmentId: match?.id,
+      },
+    };
+  } catch (error) {
+    return handleError('attaching file to draft', error);
   }
 }
 

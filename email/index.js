@@ -302,7 +302,7 @@ const emailTools = [
   {
     name: 'draft',
     description:
-      'Full draft lifecycle for review-before-send workflows (destructive: covers `send` and `delete`). action=`create` saves a new draft in the Drafts folder and returns its id (use `dryRun: true` to preview without saving; `checkRecipients: true` runs mail-tips first). action=`update` patches an existing draft by `id` (only fields passed are changed). action=`send` dispatches an existing draft — it fetches and validates the saved To/CC/BCC recipients against `OUTLOOK_ALLOWED_RECIPIENTS`, then shares the rate limit with `send-email`. action=`delete` removes a draft permanently. action=`reply`/`reply-all` creates a reply draft from a message `id` (use `comment` to prepend text — mutually exclusive with `body`). action=`forward` creates a forward draft (requires `id` and `to`). Draft creation and editing do not apply the send allowlist because they do not deliver email. Returns the draft object on create/update/reply/forward; status confirmation on send/delete.',
+      'Full draft lifecycle for review-before-send workflows (destructive: covers `send` and `delete`). action=`create` saves a new draft in the Drafts folder and returns its id (use `dryRun: true` to preview without saving; `checkRecipients: true` runs mail-tips first). action=`update` patches an existing draft by `id` (only fields passed are changed). action=`send` dispatches an existing draft — it fetches and validates the saved To/CC/BCC recipients against `OUTLOOK_ALLOWED_RECIPIENTS`, then shares the rate limit with `send-email`. action=`delete` removes a draft permanently. action=`reply`/`reply-all` creates a reply draft from a message `id` (use `comment` to prepend text — mutually exclusive with `body`). action=`forward` creates a forward draft (requires `id` and `to`). action=`attach` adds the file at absolute `filePath` to draft `id` (any size up to 150 MB), then reads it back and reports whether the SHA-256 of the mailbox copy matches the local file. Draft creation and editing do not apply the send allowlist because they do not deliver email. Returns the draft object on create/update/reply/forward; status confirmation on send/delete.',
     annotations: {
       title: 'Draft Operations',
       readOnlyHint: false,
@@ -323,13 +323,19 @@ const emailTools = [
             'reply',
             'reply-all',
             'forward',
+            'attach',
           ],
           description: 'Action to perform (required)',
         },
         id: {
           type: 'string',
           description:
-            'Draft or message ID. Required for update/send/delete/reply/reply-all/forward.',
+            'Draft or message ID. Required for update/send/delete/reply/reply-all/forward/attach.',
+        },
+        filePath: {
+          type: 'string',
+          description:
+            'Absolute path of the local file to attach (action=attach, required).',
         },
         to: {
           type: 'string',

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const handleDraft = require('../../email/draft');
 const { callGraphAPI } = require('../../utils/graph-api');
 const { ensureAuthenticated } = require('../../auth');
@@ -507,5 +508,107 @@ describe('action=forward', () => {
     expect(result.content[0].text).toContain(
       'Cannot use both comment and body'
     );
+  });
+});
+
+// ──────────────────────────────────────────────────
+// action=attach
+// ──────────────────────────────────────────────────
+describe('action=attach', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  let dir;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete global.fetch;
+  });
+
+  // Mock Graph: stores uploaded bytes so read-back returns them (or `tamper`).
+  function mockMailbox({ tamper = false } = {}) {
+    let stored = null;
+    callGraphAPI.mockImplementation(async (_t, method, p, data) => {
+      if (method === 'POST' && p.endsWith('/attachments')) {
+        stored = Buffer.from(data.contentBytes, 'base64');
+        return { id: 'att-1' };
+      }
+      if (p.endsWith('/createUploadSession')) {
+        stored = Buffer.alloc(0);
+        return { uploadUrl: 'https://upload.example/session' };
+      }
+      if (method === 'GET' && p.endsWith('/attachments')) {
+        return {
+          value: [{ id: 'att-1', name: 'doc.pdf', size: stored.length }],
+        };
+      }
+      if (method === 'GET') {
+        const bytes = tamper ? Buffer.from('other') : stored;
+        return { contentBytes: bytes.toString('base64') };
+      }
+      throw new Error(`unexpected ${method} ${p}`);
+    });
+    global.fetch = jest.fn(async (_url, opts) => {
+      stored = Buffer.concat([stored, Buffer.from(opts.body)]);
+      return { ok: true, status: 200 };
+    });
+  }
+
+  it('requires id and an absolute filePath', async () => {
+    expect(
+      (await handleDraft({ action: 'attach', filePath: '/x' })).content[0].text
+    ).toContain('Draft ID');
+    expect(
+      (await handleDraft({ action: 'attach', id: 'd' })).content[0].text
+    ).toContain('filePath is required');
+    expect(
+      (await handleDraft({ action: 'attach', id: 'd', filePath: 'rel.pdf' }))
+        .content[0].text
+    ).toContain('absolute');
+  });
+
+  it('reports a missing file without calling Graph', async () => {
+    const r = await handleDraft({
+      action: 'attach',
+      id: 'd',
+      filePath: path.join(dir, 'none.pdf'),
+    });
+    expect(r.content[0].text).toContain('Cannot read');
+    expect(callGraphAPI).not.toHaveBeenCalled();
+  });
+
+  it('uploads a small file inline and verifies the hash', async () => {
+    const f = path.join(dir, 'doc.pdf');
+    fs.writeFileSync(f, 'small pdf bytes');
+    mockMailbox();
+    const r = await handleDraft({ action: 'attach', id: 'd', filePath: f });
+    expect(r._meta.verified).toBe(true);
+    expect(r.content[0].text).toContain('VERIFIED');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('uploads a large file in 320 KiB-multiple chunks and verifies', async () => {
+    const f = path.join(dir, 'doc.pdf');
+    fs.writeFileSync(f, crypto.randomBytes(5 * 1024 * 1024));
+    mockMailbox();
+    const r = await handleDraft({ action: 'attach', id: 'd', filePath: f });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[0][1].headers['Content-Range']).toBe(
+      `bytes 0-${327680 * 12 - 1}/${5 * 1024 * 1024}`
+    );
+    expect(global.fetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    expect(r._meta.verified).toBe(true);
+  });
+
+  it('flags NOT VERIFIED when mailbox bytes differ', async () => {
+    const f = path.join(dir, 'doc.pdf');
+    fs.writeFileSync(f, 'real bytes');
+    mockMailbox({ tamper: true });
+    const r = await handleDraft({ action: 'attach', id: 'd', filePath: f });
+    expect(r._meta.verified).toBe(false);
+    expect(r.content[0].text).toContain('NOT VERIFIED');
   });
 });
