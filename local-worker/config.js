@@ -46,11 +46,11 @@ function buildGmailAccountConfig(env, accountKey) {
       '',
     clientId:
       prefix('CLIENT_ID') ||
-      (isLegacyAblative ? env.GMAIL_CLIENT_ID : '') ||
+      env.GMAIL_CLIENT_ID || // every slot can share one Google OAuth app
       '',
     clientSecret:
       prefix('CLIENT_SECRET') ||
-      (isLegacyAblative ? env.GMAIL_CLIENT_SECRET : '') ||
+      env.GMAIL_CLIENT_SECRET || // every slot can share one Google OAuth app
       '',
     refreshToken:
       prefix('REFRESH_TOKEN') ||
