@@ -9,9 +9,13 @@ const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const PROFILE_ENDPOINT =
   'https://gmail.googleapis.com/gmail/v1/users/me/profile';
 const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+// --compose adds draft creation for gmail-mcp; read access is unchanged.
+const COMPOSE_SCOPE = `${SCOPE} https://www.googleapis.com/auth/gmail.compose`;
 
 async function main() {
-  const accountKey = process.argv[2] || 'ablative';
+  const args = process.argv.slice(2);
+  const compose = args.includes('--compose');
+  const accountKey = args.find((a) => !a.startsWith('--')) || 'ablative';
   const allConfig = buildConfig();
   const config = allConfig.gmail[accountKey];
   if (!config) {
@@ -30,8 +34,10 @@ async function main() {
     );
   }
 
-  const authUrl = buildAuthUrl(config);
-  console.log('Open this URL and approve read-only Gmail access:');
+  const authUrl = buildAuthUrl(config, compose ? COMPOSE_SCOPE : SCOPE);
+  console.log(
+    `Open this URL and approve ${compose ? 'read + draft' : 'read-only'} Gmail access:`
+  );
   console.log(authUrl);
   console.log('');
   console.log(`Waiting for callback on ${config.redirectUri}`);
@@ -45,12 +51,12 @@ async function main() {
   );
 }
 
-function buildAuthUrl(config) {
+function buildAuthUrl(config, scope = SCOPE) {
   const query = {
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
     response_type: 'code',
-    scope: SCOPE,
+    scope,
     access_type: 'offline',
     prompt: 'select_account consent',
   };
@@ -88,7 +94,7 @@ function waitForCode(redirectUri) {
       }
 
       res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('Gmail read-only auth complete. You can close this tab.');
+      res.end('Gmail auth complete. You can close this tab.');
       server.close();
       resolve(code);
     });
